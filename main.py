@@ -18,19 +18,67 @@ import logging
 import os
 import random
 import re
+import uuid
+import textwrap
 from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
 from opencc import OpenCC
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, Message
+from pyowm import OWM
+from pyowm.utils import config as OWMConfig
+from pyowm.weatherapi25.weather import Weather
+from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, Message, ParseMode
 from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, Filters
 
 bot_id: str = os.getenv("TG_BOT_ID")
+
+owm_config = OWMConfig.get_default_config()
+owm_config["language"] = "zh_tw"
+owm = OWM(os.getenv("OWM_API_TOKEN"), config=owm_config)
+owmwmgr = owm.weather_manager()
+
 s2tcon = OpenCC("s2hk.json")
 t2scon = OpenCC("hk2s.json")
 quotes: list[list[str]] = [[], [], []]
-cached_inline_queries: dict[int, (str, int)] = { }
+
+help_text = f"""\
+*使用說明*
+目前支持__5__種命令：
+
+*試試手氣* (0個參數)
+`@{bot_id}`
+
+*簡轉繁* (2個參數)
+`@{bot_id} s `<文字>
+
+*繁转简* (2個參數)
+`@{bot_id} t `<文字>
+
+*生成動漫梗* (1~3個參數)
+`@{bot_id} q `[替換OO] [替換XX]
+
+*天氣報告* (2~4個參數)
+`@{bot_id} w `<City>, [Country], [State]
+\\* 目前只支持英文
+\\* City: 城市名
+\\* Country: 2位字元的地區編碼
+\\* State: 2位字元的州份編碼
+\\* 範例：Shanghai, CN
+""" \
+	.replace("(", "\\(") \
+	.replace(")", "\\)") \
+	.replace("<", "\\<") \
+	.replace(">", "\\>") \
+	.replace("[", "\\[") \
+	.replace("]", "\\]") \
+	.replace("~", "\\~")
+
+help_inline_reply = InlineQueryResultArticle(
+	id=uuid.uuid4().hex,
+	title="查看幫助",
+	input_message_content=InputTextMessageContent(help_text, parse_mode=ParseMode.MARKDOWN_V2)
+)
 
 
 # Bot command matching
@@ -39,11 +87,11 @@ def match_cmd(message: Message, cmd: str | None, required_bot_name: bool = True)
 	# Command may require @[bot_id] in group
 	if required_bot_name and message.chat.type in ["group", "supergroup"]:
 		if (cmd is not None and text.startswith(f"/{cmd}@{bot_id}")) or \
-				re.match(f"^/.+@{bot_id}", text):
+			re.match(f"^/.+@{bot_id}", text):
 			return True
 	else:
 		if cmd is not None and text.startswith(f"/{cmd}") or \
-				cmd is None and text.startswith("/"):
+			cmd is None and text.startswith("/"):
 			return True
 	
 	return False
@@ -112,71 +160,181 @@ def handle_t2s(update: Update, context: CallbackContext):
 		context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id], text=reply_text)
 
 
-# sub_quote_from_query(query_text: str) -> (original_quote, sub_quote, n)
-def sub_quote_from_query(sender: int, query_text: str) -> (str, str, int):
-	global cached_inline_queries
-	query_text = query_text.strip()
-	args = list(filter(None, re.split(r"\s+", query_text)))
-	n = len(args)
-	if n > 2:
-		return None, None, n
-	
-	cache_hit = False
-	quote = quotes[n][random.randint(0, len(quotes[n]) - 1)]
-	# Check if cached inline query
-	if sender in cached_inline_queries:
-		cached_quote, arg_count = cached_inline_queries[sender]
-		if arg_count == n:
-			quote = cached_quote
-			cache_hit = True
-	
-	# Insert/update new cache entry for the current sender
-	if not cache_hit:
-		cached_inline_queries[sender] = (quote, n)
-	
-	result = quote
-	if n >= 1:
-		result = re.sub(r"(o+)", args[0], result)
-	if n >= 2:
-		result = re.sub(r"(x+)", args[1], result)
-	
-	return quote, result, n
-
-
 def handle_inline_respond(update: Update, context: CallbackContext):
-	query = update.inline_query.query
-	sender = update.inline_query.from_user.id
-	original, reply, n = sub_quote_from_query(sender, query)
-	result = []
-	if n <= 2:
-		result.append(
-				InlineQueryResultArticle(
-						id="quote",
-						title=original,
-						input_message_content=InputTextMessageContent(reply),
-						description=reply
-				))
-	
-	if n > 0:
-		s2tresult = s2tcon.convert(query)
-		t2sresult = t2scon.convert(query)
-		result.append(
-				InlineQueryResultArticle(
-						id="s2t",
-						title="簡轉繁",
-						input_message_content=InputTextMessageContent(s2tresult),
-						description=s2tresult
-				))
+	query = update.inline_query.query.strip()
+	if not query:
+		reply_text = quotes[0][random.randint(0, len(quotes[0]) - 1)]
+		update.inline_query.answer(results=[
+			InlineQueryResultArticle(
+				id=uuid.uuid4().hex,
+				title="試試手氣～",
+				input_message_content=InputTextMessageContent(reply_text)
+			), help_inline_reply], cache_time=0)
 		
-		result.append(
-				InlineQueryResultArticle(
-						id="t2s",
-						title="繁转简",
-						input_message_content=InputTextMessageContent(t2sresult),
-						description=t2sresult
-				))
+		return
 	
-	context.bot.answer_inline_query(update.inline_query.id, result, cache_time=0)
+	match query[0]:
+		# Get quotes
+		case 'q':
+			args = list(filter(None, re.split(r"\s+", query[1:])))
+			argc = len(args)
+			results: [InlineQueryResultArticle] = []
+			if argc > 2:
+				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+				return
+			
+			for quote in quotes[argc]:
+				reply_text = quote
+				if argc >= 1:
+					reply_text = re.sub(r"(o+)", args[0], reply_text)
+				if argc >= 2:
+					reply_text = re.sub(r"(x+)", args[1], reply_text)
+				
+				results.append(
+					InlineQueryResultArticle(
+						id=uuid.uuid4().hex,
+						title=quote,
+						input_message_content=InputTextMessageContent(reply_text),
+						description=reply_text
+					)
+				)
+			
+			update.inline_query.answer(results, auto_pagination=True, cache_time=3600)
+		
+		# Simplified-Traditional Chinese translate
+		case 's':
+			if len(query) > 2 and query[1] == ' ':
+				reply_text = s2tcon.convert(query[2:].strip())
+				update.inline_query.answer(results=[
+					InlineQueryResultArticle(
+						id=uuid.uuid4().hex,
+						title="簡轉繁",
+						input_message_content=InputTextMessageContent(reply_text),
+						description=reply_text
+					)], cache_time=3600)
+			
+			else:
+				update.inline_query.answer(results=[
+					InlineQueryResultArticle(
+						id=uuid.uuid4().hex,
+						title="簡轉繁",
+						input_message_content=InputTextMessageContent("請輸入內容...."),
+						description="請輸入內容...."
+					)], cache_time=3600)
+		
+		# Traditional-Simplified Chinese translate
+		case 't':
+			if len(query) > 2 and query[1] == ' ':
+				reply_text = t2scon.convert(query[2:].strip())
+				update.inline_query.answer(results=[
+					InlineQueryResultArticle(
+						id=uuid.uuid4().hex,
+						title="繁转简",
+						input_message_content=InputTextMessageContent(reply_text),
+						description=reply_text
+					)], cache_time=3600)
+			
+			else:
+				update.inline_query.answer(results=[
+					InlineQueryResultArticle(
+						id=uuid.uuid4().hex,
+						title="繁转简",
+						input_message_content=InputTextMessageContent("请输入内容...."),
+						description="请输入内容...."
+					)], cache_time=3600)
+		
+		# Get weather forecast
+		case 'w':
+			if len(query) > 2 and query[1] == ' ':
+				city_loc = list(filter(None, re.split(r"\s*,\s*", query[2:].strip())))
+				argc = len(city_loc)
+				if argc == 0 or argc > 3 or \
+					(argc == 2 and len(city_loc[1]) != 2) or \
+					(argc == 3 and (len(city_loc[1]) != 2 or len(city_loc[2]) != 2)):
+					update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+					return
+				
+				city_ids = owm.city_id_registry()
+				targets: list = city_ids.ids_for(*city_loc, matching="like")
+				# Only not more than 8 results
+				if len(targets) == 0:
+					update.inline_query.answer(results=[
+						InlineQueryResultArticle(
+							id=uuid.uuid4().hex,
+							title="沒有結果",
+							input_message_content=InputTextMessageContent("沒有結果"),
+							description="你所搜尋的城市可能不存在"
+						)
+					], cache_time=3600)
+					
+					return
+				
+				if len(targets) > 5:
+					update.inline_query.answer(results=[
+						InlineQueryResultArticle(
+							id=uuid.uuid4().hex,
+							title="結果太多",
+							input_message_content=InputTextMessageContent("結果太多"),
+							description="存在多個同名城市，請加入地區編碼"
+						)
+					], cache_time=3600)
+					
+					return
+				
+				results: [InlineQueryResultArticle] = []
+				for target in targets:
+					observation = owmwmgr.weather_at_coords(target[4], target[5])
+					if observation is None:
+						update.inline_query.answer(results=[
+							InlineQueryResultArticle(
+								id=uuid.uuid4().hex,
+								title="沒有結果",
+								input_message_content=InputTextMessageContent("沒有結果"),
+								description="OWM目前不支持這個城市的天氣查詢"
+							)
+						], cache_time=3600)
+						
+						return
+					
+					weather: Weather = observation.weather
+					temp_data = weather.temperature(unit="celsius")
+					wind_data = weather.wind(unit="km_hour")
+					pressure = weather.barometric_pressure()
+					loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
+					reply_text = textwrap.dedent(f"""\
+						*{loc_name} 天氣報告*
+						
+						*天氣狀況：*{weather.detailed_status}
+						*體感温度：*{temp_data["feels_like"]:.1f}°C
+						*實際温度：*{temp_data["temp"]:.1f}°C
+						*最高温度：*{temp_data["temp_max"]:.1f}°C
+						*最低温度：*{temp_data["temp_min"]:.1f}°C
+						*風速：*{wind_data["speed"]:.1f} km/h \\({wind_data["deg"]}°\\)
+						*濕度：*{weather.humidity}%
+						*雲量：*{weather.clouds}%
+						*大氣壓：*{pressure["press"]} hPa
+						*能見度：*{weather.visibility_distance / 1000} km
+						*過去1小時的降雨量：*{weather.rain.get("1h") or 0} mm""" \
+							.replace(".", "\\.") \
+							.replace("-", "\\-"))
+					
+					results.append(
+						InlineQueryResultArticle(
+							id=uuid.uuid4().hex,
+							title=loc_name,
+							input_message_content=InputTextMessageContent(message_text=reply_text, parse_mode=ParseMode.MARKDOWN_V2),
+							description=f'{temp_data["temp"]:.1f}°C'
+						)
+					)
+				
+				update.inline_query.answer(results, cache_time=300, auto_pagination=True)
+				
+			else:
+				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+				return
+		
+		case _:
+			update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
 
 def build_quote_list(path: str):
@@ -200,12 +358,14 @@ def build_quote_list(path: str):
 	matches: list[str] = re.findall(r"-->\[\[(.+?)]]", content)
 	for idx, quote in enumerate(matches):
 		qs = quote.split('|')
-		result = qs[0]
-		if len(qs) > 1:
-			for idxx, s in enumerate(qs):
-				if not s and not re.match(r"[/({]", s):
-					result = qs[idxx]
-					break
+		result = ""
+		for s in qs:
+			if s and not re.search(r"[/(){}]", s):
+				result = s
+				break
+		
+		if not result:
+			continue
 		
 		if re.search("o{2,}", result) and re.search("x{2,}", result):
 			quotes[2].append(s2tcon.convert(result))
