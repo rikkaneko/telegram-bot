@@ -14,6 +14,7 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import csv
 import logging
 import os
 import random
@@ -21,6 +22,7 @@ import re
 import uuid
 import textwrap
 from pathlib import Path
+from time import sleep
 
 import requests
 from bs4 import BeautifulSoup
@@ -28,25 +30,35 @@ from opencc import OpenCC
 from pyowm import OWM
 from pyowm.utils import config as OWMConfig
 from pyowm.weatherapi25.weather import Weather
-from telegram import Update, InlineQueryResultArticle, InputTextMessageContent, Message, ParseMode
+from pixivpy3 import AppPixivAPI
+from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, InlineKeyboardMarkup, InlineKeyboardButton, InputTextMessageContent, Message, ParseMode
 from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, Filters
+from telegram.utils.helpers import escape_markdown
 
-bot_id: str = os.getenv("TG_BOT_ID")
-
+bot_id = os.getenv("TG_BOT_ID")
+# OpenWeatherMap API (via pyowm)
 owm_config = OWMConfig.get_default_config()
 owm_config["language"] = "zh_tw"
 owm = OWM(os.getenv("OWM_API_TOKEN"), config=owm_config)
 owmwmgr = owm.weather_manager()
+# Pixiv (via pixivpy)
+api = AppPixivAPI()
+api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
 
 s2tcon = OpenCC("s2hk.json")
 t2scon = OpenCC("hk2s.json")
 quotes: list[list[str]] = [[], [], []]
+bookmark_ids = []
+
 
 help_text = f"""\
 *使用說明*
-目前支持__5__種命令：
+目前支持__6__種命令：
 
 *試試手氣* (0個參數)
+`@{bot_id}`
+
+*來點色圖* (0個參數)
 `@{bot_id}`
 
 *簡轉繁* (2個參數)
@@ -60,11 +72,11 @@ help_text = f"""\
 
 *天氣報告* (2~4個參數)
 `@{bot_id} w `<City>, [Country], [State]
-\\* 目前只支持英文
-\\* City: 城市名
-\\* Country: 2位字元的地區編碼
-\\* State: 2位字元的州份編碼
-\\* 範例：Shanghai, CN
+＊ 目前只支持英文
+＊ City: 城市名
+＊ Country: 2位字元的地區編碼
+＊ State: 2位字元的州份編碼
+＊ 範例：Shanghai, CN
 """ \
 	.replace("(", "\\(") \
 	.replace(")", "\\)") \
@@ -109,7 +121,7 @@ def handle_cmd(update: Update, context: CallbackContext):
 def handle_s2t(update: Update, context: CallbackContext):
 	# Call with arguments
 	if update.message is not None:
-		text: str = "".join(context.args)
+		text = "".join(context.args)
 		# Call with replied message as argument
 		if not text:
 			if update.message.reply_to_message is not None:
@@ -124,7 +136,7 @@ def handle_s2t(update: Update, context: CallbackContext):
 		context.user_data[message_id] = replied.message_id
 	
 	else:
-		text: str = "".join(context.args)
+		text = "".join(context.args)
 		if not text:
 			return
 		
@@ -136,7 +148,7 @@ def handle_s2t(update: Update, context: CallbackContext):
 def handle_t2s(update: Update, context: CallbackContext):
 	# Call with arguments
 	if update.message is not None:
-		text: str = "".join(context.args)
+		text = "".join(context.args)
 		# Call with replied message as argument
 		if not text:
 			if update.message.reply_to_message is not None:
@@ -151,7 +163,7 @@ def handle_t2s(update: Update, context: CallbackContext):
 		context.user_data[message_id] = replied.message_id
 	
 	else:
-		text: str = "".join(context.args)
+		text = "".join(context.args)
 		if not text:
 			return
 		
@@ -160,15 +172,63 @@ def handle_t2s(update: Update, context: CallbackContext):
 		context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id], text=reply_text)
 
 
+def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
+	logging.info(f"[make_pixiv_illust_reply] Querying Pixiv illustration of id=\"{pxid}\"")
+	result = api.illust_detail(pxid)
+	illust = result.illust
+	if illust and illust.visible:
+		logging.info(f"[make_pixiv_illust_reply] Query sucessful => id=\"{pxid}\", title=\"{illust.title}\"")
+		title = escape_markdown(illust.title, version=2)
+		author = escape_markdown(illust.user.name, version=2)
+		caption_text = textwrap.dedent(f"""\
+		標題：[{title}](https://www.pixiv.net/artworks/{illust.id})
+		畫師：[{author}](https://www.pixiv.net/users/{illust.user.id})
+		標籤： """)
+		for tag in illust.tags:
+			caption_text += f"\\#{escape_markdown(tag.name, version=2)} "
+		
+		keyboard = [[InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat="")]]
+		reply_markup = InlineKeyboardMarkup(keyboard)
+		
+		return InlineQueryResultPhoto(
+			id=uuid.uuid4().hex,
+			title="來點色圖",
+			description=title,
+			photo_url=illust.image_urls.large,
+			thumb_url=illust.image_urls.square_medium,
+			caption=caption_text,
+			parse_mode=ParseMode.MARKDOWN_V2,
+			reply_markup=reply_markup
+		)
+	
+	logging.error(f"[make_pixiv_illust_reply] Query failed of id=\"{pxid}\"")
+
+
 def handle_inline_respond(update: Update, context: CallbackContext):
 	query = update.inline_query.query.strip()
 	if not query:
-		reply_text = quotes[0][random.randint(0, len(quotes[0]) - 1)]
+		reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
+		pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
+		reply_image = make_pixiv_illust_reply(pxid)
+		retry_count = 0
+		while reply_image is None and retry_count < 3:
+			sleep(random.randint(0, 2) + 1)
+			pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
+			reply_image = make_pixiv_illust_reply(pxid)
+		
+		if reply_image is None:
+			reply_image = InlineQueryResultArticle(
+				id=uuid.uuid4().hex,
+				title="沒有色圖了",
+				input_message_content=InputTextMessageContent("沒有色圖了")
+			)
+		
 		update.inline_query.answer(results=[
+			reply_image,
 			InlineQueryResultArticle(
 				id=uuid.uuid4().hex,
 				title="試試手氣～",
-				input_message_content=InputTextMessageContent(reply_text)
+				input_message_content=InputTextMessageContent(reply_quote)
 			), help_inline_reply], cache_time=0)
 		
 		return
@@ -178,7 +238,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 		case 'q':
 			args = list(filter(None, re.split(r"\s+", query[1:])))
 			argc = len(args)
-			results: [InlineQueryResultArticle] = []
+			results = []
 			if argc > 2:
 				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 				return
@@ -214,13 +274,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					)], cache_time=3600)
 			
 			else:
-				update.inline_query.answer(results=[
-					InlineQueryResultArticle(
-						id=uuid.uuid4().hex,
-						title="簡轉繁",
-						input_message_content=InputTextMessageContent("請輸入內容...."),
-						description="請輸入內容...."
-					)], cache_time=3600)
+				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 		
 		# Traditional-Simplified Chinese translate
 		case 't':
@@ -235,13 +289,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					)], cache_time=3600)
 			
 			else:
-				update.inline_query.answer(results=[
-					InlineQueryResultArticle(
-						id=uuid.uuid4().hex,
-						title="繁转简",
-						input_message_content=InputTextMessageContent("请输入内容...."),
-						description="请输入内容...."
-					)], cache_time=3600)
+				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 		
 		# Get weather forecast
 		case 'w':
@@ -255,7 +303,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					return
 				
 				city_ids = owm.city_id_registry()
-				targets: list = city_ids.ids_for(*city_loc, matching="like")
+				targets = city_ids.ids_for(*city_loc, matching="like")
 				# Only not more than 8 results
 				if len(targets) == 0:
 					update.inline_query.answer(results=[
@@ -281,7 +329,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					
 					return
 				
-				results: [InlineQueryResultArticle] = []
+				results = []
 				for target in targets:
 					observation = owmwmgr.weather_at_coords(target[4], target[5])
 					if observation is None:
@@ -340,45 +388,92 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 def build_quote_list(path: str):
 	global quotes
 	file_path = Path(path)
-	content: str = ""
 	# Download the file if not exist
 	if not file_path.exists():
 		response = requests.get("https://zh.moegirl.org.cn/index.php?title=Template:ACG%E7%BB%8F%E5%85%B8%E5%8F%B0%E8%AF%8D&action=edit")
 		soup = BeautifulSoup(response.text, "html5lib")
 		content = soup.find("textarea", { "id": "wpTextbox1" }).text.strip()
-		# Write to file
-		with open(file_path, 'w') as f:
-			f.write(content)
+		
+		matches = re.findall(r"\[\[(.+?)]]", content)
+		for idx, quote in enumerate(matches[2:]):
+			qs = quote.split('|')
+			result = ""
+			for s in qs:
+				if s and not re.search(r"[/(){}]", s):
+					result = s
+					break
+			
+			if not result:
+				continue
+			
+			if re.search("o{2,}", result) and re.search("x{2,}", result):
+				quotes[2].append(s2tcon.convert(result))
+			elif re.search("o{2,}", result):
+				quotes[1].append(s2tcon.convert(result))
+			else:
+				quotes[0].append(s2tcon.convert(result))
+		
+		# Build quote list
+		fields = ["quote_text", "param_count"]
+		with open(file_path, "w") as f:
+			writer = csv.writer(f)
+			writer.writerow(fields)
+			for idx, quote_list in enumerate(quotes):
+				for quote in quote_list:
+					writer.writerow([quote, idx])
 	
-	# Read from existing source
 	else:
-		with open(file_path, 'r') as f:
-			content = f.read()
-	
-	matches: list[str] = re.findall(r"-->\[\[(.+?)]]", content)
-	for idx, quote in enumerate(matches):
-		qs = quote.split('|')
-		result = ""
-		for s in qs:
-			if s and not re.search(r"[/(){}]", s):
-				result = s
-				break
-		
-		if not result:
-			continue
-		
-		if re.search("o{2,}", result) and re.search("x{2,}", result):
-			quotes[2].append(s2tcon.convert(result))
-		elif re.search("o{2,}", result):
-			quotes[1].append(s2tcon.convert(result))
-		else:
-			quotes[0].append(s2tcon.convert(result))
+		# Read from local quote sources
+		with open(file_path, "r") as f:
+			reader = csv.reader(f)
+			# Skip header
+			next(reader, None)
+			for [quote, param_count] in list(reader):
+				quotes[int(param_count)].append(quote)
 
+
+def build_pixivid_list(path: str):
+	global bookmark_ids
+	file_path = Path(path)
+	next_qs = { "user_id": os.getenv("PIXIV_USER_ID") }
+	should_break = False
+	
+	file_path.touch(exist_ok=True)
+	with open(file_path, "r") as f:
+		for line in f:
+			bookmark_ids.append(int(line.rstrip("\n")))
+	
+	newly_add_bookmarks = []
+	while next_qs:
+		result = api.user_bookmarks_illust(**next_qs)
+		for illust in result.illusts:
+			# Skip if the illustration not accessible
+			if not illust.visible:
+				continue
+			
+			if bookmark_ids and illust.id == bookmark_ids[-1]:
+				should_break = True
+				break
+			
+			newly_add_bookmarks.append(illust.id)
+		
+		if should_break:
+			break
+		
+		next_qs = api.parse_qs(result.next_url)
+		sleep(random.randint(0, 4) + 1)
+		
+	with open(file_path, "a") as f:
+		for pxid in reversed(newly_add_bookmarks):
+			bookmark_ids.append(pxid)
+			f.write(f"{pxid}\n")
+	
 
 def main():
 	logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
-	build_quote_list("./moegirl-acg-words.txt")
-	updater: Updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
+	build_quote_list("moegirl-acg-quotes.csv")
+	build_pixivid_list("bookmarks.txt")
+	updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
 	dispatcher: Dispatcher = updater.dispatcher
 	handlers = [
 		CommandHandler("s2t", handle_s2t),
