@@ -77,14 +77,9 @@ help_text = f"""\
 ＊ Country: 2位字元的地區編碼
 ＊ State: 2位字元的州份編碼
 ＊ 範例：Shanghai, CN
-""" \
-	.replace("(", "\\(") \
-	.replace(")", "\\)") \
-	.replace("<", "\\<") \
-	.replace(">", "\\>") \
-	.replace("[", "\\[") \
-	.replace("]", "\\]") \
-	.replace("~", "\\~")
+"""
+
+help_text = re.sub(r"([()<>\[\]~])", r"\\\1", help_text)
 
 help_inline_reply = InlineQueryResultArticle(
 	id=uuid.uuid4().hex,
@@ -185,7 +180,10 @@ def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
 		畫師：[{author}](https://www.pixiv.net/users/{illust.user.id})
 		標籤： """)
 		for tag in illust.tags:
-			caption_text += f"\\#{escape_markdown(tag.name, version=2)} "
+			# Replace some symbols that break hashtag
+			name = re.sub(r"\u30FB|[- ]", r"_", tag.name)
+			caption_text += f"\\#{escape_markdown(name, version=2)} "
+		caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 		
 		keyboard = [[InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat="")]]
 		reply_markup = InlineKeyboardMarkup(keyboard)
@@ -215,6 +213,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 			sleep(random.randint(0, 2) + 1)
 			pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
 			reply_image = make_pixiv_illust_reply(pxid)
+			retry_count += 1
 		
 		if reply_image is None:
 			reply_image = InlineQueryResultArticle(
@@ -304,6 +303,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 				
 				city_ids = owm.city_id_registry()
 				targets = city_ids.ids_for(*city_loc, matching="like")
+				logging.info(f"[city_id_registry] Found {len(targets)} results for the query_text=\"{query[2:].strip()}\"")
 				# Only not more than 8 results
 				if len(targets) == 0:
 					update.inline_query.answer(results=[
@@ -349,6 +349,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					wind_data = weather.wind(unit="km_hour")
 					pressure = weather.barometric_pressure()
 					loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
+					logging.info(f"[owmwmgr] Replied the weather for \"{loc_name}\"")
 					reply_text = textwrap.dedent(f"""\
 						*{loc_name} 天氣報告*
 						
