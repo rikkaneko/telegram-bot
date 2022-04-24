@@ -15,6 +15,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import csv
+import json
 import logging
 import os
 import random
@@ -31,7 +32,8 @@ from pyowm import OWM
 from pyowm.utils import config as OWMConfig
 from pyowm.weatherapi25.weather import Weather
 from pixivpy3 import AppPixivAPI
-from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, InlineKeyboardMarkup, InlineKeyboardButton, InputTextMessageContent, Message, ParseMode
+from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, InlineKeyboardMarkup, InlineKeyboardButton, InputTextMessageContent, \
+	Message, ParseMode
 from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, Filters
 from telegram.utils.helpers import escape_markdown
 
@@ -49,7 +51,6 @@ s2tcon = OpenCC("s2hk.json")
 t2scon = OpenCC("hk2s.json")
 quotes: list[list[str]] = [[], [], []]
 bookmark_ids = []
-
 
 help_text = f"""\
 *使用說明*
@@ -105,6 +106,7 @@ def match_cmd(message: Message, cmd: str | None, required_bot_name: bool = True)
 
 
 def handle_cmd(update: Update, context: CallbackContext):
+	logging.info(f"Received command {json.dumps({'text': update.message.text}, ensure_ascii=False)}")
 	if match_cmd(update.message, "start", True):
 		update.message.reply_text(text="哈囉～我是貓空～！", quote=True)
 	elif match_cmd(update.message, "say", True):
@@ -128,6 +130,7 @@ def handle_s2t(update: Update, context: CallbackContext):
 		reply_text = s2tcon.convert(text)
 		# Message id of the response message
 		replied: Message = context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
+		# TODO Make user_data persistence
 		context.user_data[message_id] = replied.message_id
 	
 	else:
@@ -155,6 +158,7 @@ def handle_t2s(update: Update, context: CallbackContext):
 		reply_text = t2scon.convert(text)
 		# Message id of the response message
 		replied: Message = context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
+		# TODO Make user_data persistence
 		context.user_data[message_id] = replied.message_id
 	
 	else:
@@ -168,11 +172,11 @@ def handle_t2s(update: Update, context: CallbackContext):
 
 
 def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
-	logging.info(f"[make_pixiv_illust_reply] Querying Pixiv illustration of id=\"{pxid}\"")
+	logging.info(f"Querying Pixiv illustration {json.dumps({'pixiv_id': pxid})}")
 	result = api.illust_detail(pxid)
 	illust = result.illust
 	if illust and illust.visible:
-		logging.info(f"[make_pixiv_illust_reply] Query sucessful => id=\"{pxid}\", title=\"{illust.title}\"")
+		logging.info(f"Query sucessful {json.dumps({'pixiv_id': pxid, 'title': illust.title}, ensure_ascii=False)}")
 		title = escape_markdown(illust.title, version=2)
 		author = escape_markdown(illust.user.name, version=2)
 		caption_text = textwrap.dedent(f"""\
@@ -181,7 +185,7 @@ def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
 		標籤： """)
 		for tag in illust.tags:
 			# Replace some symbols that break hashtag
-			name = re.sub(r"\u30FB|[- ]", r"_", tag.name)
+			name = re.sub(r"\u30FB|[-?() ]", r"_", tag.name)
 			caption_text += f"\\#{escape_markdown(name, version=2)} "
 		caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 		
@@ -199,23 +203,29 @@ def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
 			reply_markup=reply_markup
 		)
 	
-	logging.error(f"[make_pixiv_illust_reply] Query failed of id=\"{pxid}\"")
+	logging.error(f"Query failed {json.dumps({'pixiv_id': pxid})}")
 
 
 def handle_inline_respond(update: Update, context: CallbackContext):
 	query = update.inline_query.query.strip()
+	user = update.inline_query.from_user
+	logging.info(f"Received user query {json.dumps({'from_user': {'id': user.id, 'username': user.name}, 'query_text': query}, ensure_ascii=False)}")
 	if not query:
 		reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
 		pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
 		reply_image = make_pixiv_illust_reply(pxid)
 		retry_count = 0
 		while reply_image is None and retry_count < 3:
-			sleep(random.randint(0, 2) + 1)
+			sleep(random.randint(0, 2))
 			pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
-			reply_image = make_pixiv_illust_reply(pxid)
 			retry_count += 1
+			logging.warning(f"Retrying pixiv query for the {retry_count} times {json.dumps({'pixiv_id': pxid})}")
+			# Refresh token if failed
+			api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+			reply_image = make_pixiv_illust_reply(pxid)
 		
 		if reply_image is None:
+			logging.warning(f"0 result from pixiv received {json.dumps({'pixiv_id': pxid})}")
 			reply_image = InlineQueryResultArticle(
 				id=uuid.uuid4().hex,
 				title="沒有色圖了",
@@ -303,7 +313,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 				
 				city_ids = owm.city_id_registry()
 				targets = city_ids.ids_for(*city_loc, matching="like")
-				logging.info(f"[city_id_registry] Found {len(targets)} results for the query_text=\"{query[2:].strip()}\"")
+				logging.info(f"Found {len(targets)} locations for {json.dumps({'query_text': query[2:].strip()}, ensure_ascii=False)}")
 				# Only not more than 8 results
 				if len(targets) == 0:
 					update.inline_query.answer(results=[
@@ -331,8 +341,10 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 				
 				results = []
 				for target in targets:
+					loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
 					observation = owmwmgr.weather_at_coords(target[4], target[5])
 					if observation is None:
+						logging.warning(f"0 result from OpenWeatherMap API received {json.dumps({'location': loc_name, 'lat': target[4], 'lon': target[5]}, ensure_ascii=False)}")
 						update.inline_query.answer(results=[
 							InlineQueryResultArticle(
 								id=uuid.uuid4().hex,
@@ -348,8 +360,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					temp_data = weather.temperature(unit="celsius")
 					wind_data = weather.wind(unit="km_hour")
 					pressure = weather.barometric_pressure()
-					loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
-					logging.info(f"[owmwmgr] Replied the weather for \"{loc_name}\"")
+					logging.info(f"Query sucessful {json.dumps({'location': loc_name}, ensure_ascii=False)}")
 					reply_text = textwrap.dedent(f"""\
 						*{loc_name} 天氣報告*
 						
@@ -364,8 +375,8 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 						*大氣壓：*{pressure["press"]} hPa
 						*能見度：*{weather.visibility_distance / 1000} km
 						*過去1小時的降雨量：*{weather.rain.get("1h") or 0} mm""" \
-							.replace(".", "\\.") \
-							.replace("-", "\\-"))
+												.replace(".", "\\.") \
+												.replace("-", "\\-"))
 					
 					results.append(
 						InlineQueryResultArticle(
@@ -377,7 +388,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					)
 				
 				update.inline_query.answer(results, cache_time=300, auto_pagination=True)
-				
+			
 			else:
 				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 				return
@@ -431,6 +442,8 @@ def build_quote_list(path: str):
 			next(reader, None)
 			for [quote, param_count] in list(reader):
 				quotes[int(param_count)].append(quote)
+	
+	logging.info(f"Built ACG quote list with {len(quotes[0])}+{len(quotes[1])}+{len(quotes[2])} elements respectively")
 
 
 def build_pixivid_list(path: str):
@@ -463,15 +476,18 @@ def build_pixivid_list(path: str):
 		
 		next_qs = api.parse_qs(result.next_url)
 		sleep(random.randint(0, 4) + 1)
-		
+	
 	with open(file_path, "a") as f:
 		for pxid in reversed(newly_add_bookmarks):
 			bookmark_ids.append(pxid)
 			f.write(f"{pxid}\n")
 	
+	logging.info(f"Built Pixiv list with {len(bookmark_ids)} elements")
+
 
 def main():
-	logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+	logging.basicConfig(format="%(asctime)s %(levelname)s [%(pathname)s:%(lineno)s]: %(message)s", level=logging.INFO, datefmt="%Y-%m-%dT%H:%M:%S%z")
+	# Build lists
 	build_quote_list("moegirl-acg-quotes.csv")
 	build_pixivid_list("bookmarks.txt")
 	updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
