@@ -4,3 +4,4 @@ pyowm~=3.3.0
 pixivpy~=3.7.0
 python-telegram-bot~=13.11
 requests~=2.27.1
+python-dotenv~=0.20.0

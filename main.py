@@ -37,6 +37,10 @@ from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, I
 	Message, ParseMode
 from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, Filters
 from telegram.utils.helpers import escape_markdown
+from dotenv import load_dotenv
+
+# Load environment variable from .env file
+load_dotenv()
 
 bot_id = os.getenv("TG_BOT_ID")
 # OpenWeatherMap API (via pyowm)
@@ -44,13 +48,16 @@ owm_config = OWMConfig.get_default_config()
 owm_config["language"] = "zh_tw"
 owm = OWM(os.getenv("OWM_API_TOKEN"), config=owm_config)
 owmwmgr = owm.weather_manager()
+
 # Pixiv (via pixivpy)
 api = AppPixivAPI()
 api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+
 # OpenCC
 s2tcon = OpenCC("s2hk.json")
 t2scon = OpenCC("hk2s.json")
-# Lists
+
+# Global shared variables
 quotes: list[list[str]] = [[], [], []]
 bookmark_ids = []
 admins = []
@@ -121,19 +128,19 @@ def handle_cmd(update: Update, context: CallbackContext):
 		update.message.reply_text(text="Sorry～我不懂你在說啥呢～！", quote=True)
 
 
-def handle_s2t(update: Update, context: CallbackContext):
+def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC):
 	# Call with arguments
 	if update.message is not None:
 		text = "".join(context.args)
 		# Call with replied message as argument
 		if not text:
 			if update.message.reply_to_message is not None:
-				reply_text = s2tcon.convert(update.message.reply_to_message.text)
+				reply_text = cc_profile.convert(update.message.reply_to_message.text)
 				update.message.reply_text(text=reply_text, quote=True)
 			return
 		
 		message_id = update.message.message_id
-		reply_text = s2tcon.convert(text)
+		reply_text = cc_profile.convert(text)
 		# Message id of the response message
 		replied: Message = context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
 		# TODO Make user_data persistence
@@ -145,37 +152,9 @@ def handle_s2t(update: Update, context: CallbackContext):
 			return
 		
 		message_id = update.edited_message.message_id
-		reply_text = s2tcon.convert(text)
+		reply_text = cc_profile.convert(text)
 		context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id], text=reply_text)
-
-
-def handle_t2s(update: Update, context: CallbackContext):
-	# Call with arguments
-	if update.message is not None:
-		text = "".join(context.args)
-		# Call with replied message as argument
-		if not text:
-			if update.message.reply_to_message is not None:
-				reply_text = t2scon.convert(update.message.reply_to_message.text)
-				update.message.reply_text(text=reply_text, quote=True)
-			return
 		
-		message_id = update.message.message_id
-		reply_text = t2scon.convert(text)
-		# Message id of the response message
-		replied: Message = context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
-		# TODO Make user_data persistence
-		context.user_data[message_id] = replied.message_id
-	
-	else:
-		text = "".join(context.args)
-		if not text:
-			return
-		
-		message_id = update.edited_message.message_id
-		reply_text = t2scon.convert(text)
-		context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id], text=reply_text)
-
 
 def handle_bot_log(update: Update, context: CallbackContext):
 	if update.message and update.message.chat.type == "private":
@@ -185,21 +164,56 @@ def handle_bot_log(update: Update, context: CallbackContext):
 			update.message.reply_text("不能看喔～", quote=True)
 
 
-def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
-	logging.info(f"Querying Pixiv illustration {json.dumps({ 'pixiv_id': pxid })}")
-	result = api.illust_detail(pxid)
+# Generate Quote lists based on current input `query_text`
+def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
+	args = list(filter(None, re.split(r"\s+", query_text)))
+	argc = len(args)
+	results = []
+	if argc > 2:
+		return [help_inline_reply]
+	
+	for quote in quotes[argc]:
+		reply_text = quote
+		if argc >= 1:
+			reply_text = re.sub(r"(o+)", args[0], reply_text)
+		if argc >= 2:
+			reply_text = re.sub(r"(x+)", args[1], reply_text)
+		
+		results.append(
+			InlineQueryResultArticle(
+				id=uuid.uuid4().hex,
+				title=quote,
+				input_message_content=InputTextMessageContent(reply_text),
+				description=reply_text
+			)
+		)
+	
+	return results
+
+
+# Generate Pixiv illustration reply from `pixiv_id`
+def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
+	logging.info(f"Querying Pixiv illustration {json.dumps({ 'pixiv_id': pixiv_id })}")
+	retry_count = 0
+	result = api.illust_detail(pixiv_id)
 	illust = result.illust
+	if not illust:
+		# Refresh token once if failed
+		logging.info(f"Pixiv token may expired, attempt to refresh...")
+		api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+		result = api.illust_detail(pixiv_id)
+	
 	if illust and illust.visible:
-		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': pxid, 'title': illust.title }, ensure_ascii=False)}")
+		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': pixiv_id, 'title': illust.title }, ensure_ascii=False)}")
 		title = escape_markdown(illust.title, version=2)
 		author = escape_markdown(illust.user.name, version=2)
 		caption_text = textwrap.dedent(f"""\
-		標題：[{title}](https://www.pixiv.net/artworks/{illust.id})
-		畫師：[{author}](https://www.pixiv.net/users/{illust.user.id})
-		標籤： """)
+		標題: [{title}](https://www.pixiv.net/artworks/{illust.id})
+		畫師: [{author}](https://www.pixiv.net/users/{illust.user.id})
+		標籤: """)
 		for tag in illust.tags:
 			# Replace some symbols that break hashtag
-			name = re.sub(r"\u30FB|[-?() ]", r"_", tag.name)
+			name = re.sub(r"\u30FB|\u2606|[-?!()/. ]", r"_", tag.name)
 			caption_text += f"\\#{escape_markdown(name, version=2)} "
 		caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 		
@@ -211,13 +225,81 @@ def make_pixiv_illust_reply(pxid: int) -> InlineQueryResultPhoto:
 			title="來點色圖",
 			description=illust.title,
 			photo_url=illust.image_urls.large,
-			thumb_url=illust.image_urls.square_medium,
+			thumb_url=illust.image_urls.large,
 			caption=caption_text,
 			parse_mode=ParseMode.MARKDOWN_V2,
 			reply_markup=reply_markup
 		)
 	
-	logging.error(f"Query failed {json.dumps({ 'pixiv_id': pxid })}")
+	logging.error(f"Query failed {json.dumps({ 'pixiv_id': pixiv_id })}")
+
+
+# Fetch random Pixiv illustration
+def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArticle:
+	# Retry up to 3 times
+	for retry_count in range(1, 4):
+		pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
+		reply_image = make_pixiv_illust_reply(pxid)
+		if reply_image:
+			return reply_image
+		logging.warning(f"Retrying pixiv query for the {retry_count} of 3 times {json.dumps({ 'pixiv_id': pxid })}")
+	
+	logging.warning(f"Retry limit reached")
+	# Feedback reply
+	return InlineQueryResultArticle(
+		id=uuid.uuid4().hex,
+		title="找不到色圖",
+		input_message_content=InputTextMessageContent("找不到色圖")
+	)
+
+
+# Generate weather reply based on given `locations`
+def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
+	results = []
+	for target in locations:
+		loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
+		observation = owmwmgr.weather_at_coords(target[4], target[5])
+		if observation is None:
+			logging.warning(f"0 result from OpenWeatherMap API received {json.dumps({ 'location': loc_name, 'lat': target[4], 'lon': target[5] }, ensure_ascii=False)}")
+			return [InlineQueryResultArticle(
+				id=uuid.uuid4().hex,
+				title="沒有結果",
+				input_message_content=InputTextMessageContent("沒有結果"),
+				description="OWM目前不支持這個城市的天氣查詢"
+			)]
+		
+		weather: Weather = observation.weather
+		temp_data = weather.temperature(unit="celsius")
+		wind_data = weather.wind(unit="km_hour")
+		pressure = weather.barometric_pressure()
+		logging.info(f"Query sucessful {json.dumps({ 'location': loc_name }, ensure_ascii=False)}")
+		reply_text = textwrap.dedent(f"""\
+			*{loc_name} 天氣報告*
+			
+			*天氣狀況：*{weather.detailed_status}
+			*體感温度：*{temp_data["feels_like"]:.1f}°C
+			*實際温度：*{temp_data["temp"]:.1f}°C
+			*最高温度：*{temp_data["temp_max"]:.1f}°C
+			*最低温度：*{temp_data["temp_min"]:.1f}°C
+			*風速：*{wind_data["speed"]:.1f} km/h \\({wind_data["deg"]}°\\)
+			*濕度：*{weather.humidity}%
+			*雲量：*{weather.clouds}%
+			*大氣壓：*{pressure["press"]} hPa
+			*能見度：*{weather.visibility_distance / 1000} km
+			*過去1小時的降雨量：*{weather.rain.get("1h") or 0} mm""")
+		
+		reply_text = re.sub(r"([.-])", r"\\\1", reply_text)
+		
+		results.append(
+			InlineQueryResultArticle(
+				id=uuid.uuid4().hex,
+				title=loc_name,
+				input_message_content=InputTextMessageContent(message_text=reply_text, parse_mode=ParseMode.MARKDOWN_V2),
+				description=f'{temp_data["temp"]:.1f}°C'
+			)
+		)
+	
+	return results
 
 
 def handle_inline_respond(update: Update, context: CallbackContext):
@@ -227,25 +309,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 		f"Received user query {json.dumps({ 'from_user': { 'id': user.id, 'username': user.name }, 'query_text': query }, ensure_ascii=False)}")
 	if not query:
 		reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
-		pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
-		reply_image = make_pixiv_illust_reply(pxid)
-		retry_count = 0
-		while reply_image is None and retry_count < 3:
-			sleep(random.randint(0, 2))
-			pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
-			retry_count += 1
-			logging.warning(f"Retrying pixiv query for the {retry_count} times {json.dumps({ 'pixiv_id': pxid })}")
-			# Refresh token if failed
-			api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
-			reply_image = make_pixiv_illust_reply(pxid)
-		
-		if reply_image is None:
-			logging.warning(f"0 result from pixiv received {json.dumps({ 'pixiv_id': pxid })}")
-			reply_image = InlineQueryResultArticle(
-				id=uuid.uuid4().hex,
-				title="沒有色圖了",
-				input_message_content=InputTextMessageContent("沒有色圖了")
-			)
+		reply_image = get_random_pixiv_illust()
 		
 		update.inline_query.answer(results=[
 			reply_image,
@@ -258,31 +322,13 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 		return
 	
 	match query[0]:
+		# Get help
+		case 'h':
+			update.inline_query.answer([help_inline_reply], auto_pagination=True, cache_time=3600)
+			
 		# Get quotes
 		case 'q':
-			args = list(filter(None, re.split(r"\s+", query[1:])))
-			argc = len(args)
-			results = []
-			if argc > 2:
-				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
-				return
-			
-			for quote in quotes[argc]:
-				reply_text = quote
-				if argc >= 1:
-					reply_text = re.sub(r"(o+)", args[0], reply_text)
-				if argc >= 2:
-					reply_text = re.sub(r"(x+)", args[1], reply_text)
-				
-				results.append(
-					InlineQueryResultArticle(
-						id=uuid.uuid4().hex,
-						title=quote,
-						input_message_content=InputTextMessageContent(reply_text),
-						description=reply_text
-					)
-				)
-			
+			results = make_quote_reply(query[1:])
 			update.inline_query.answer(results, auto_pagination=True, cache_time=3600)
 		
 		# Simplified-Traditional Chinese translate
@@ -327,10 +373,10 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					return
 				
 				city_ids = owm.city_id_registry()
-				targets = city_ids.ids_for(*city_loc, matching="like")
-				logging.info(f"Found {len(targets)} locations for {json.dumps({ 'query_text': query[2:].strip() }, ensure_ascii=False)}")
+				locations = city_ids.ids_for(*city_loc, matching="like")
+				logging.info(f"Found {len(locations)} locations for {json.dumps({ 'query_text': query[2:].strip() }, ensure_ascii=False)}")
 				# Only not more than 8 results
-				if len(targets) == 0:
+				if len(locations) == 0:
 					update.inline_query.answer(results=[
 						InlineQueryResultArticle(
 							id=uuid.uuid4().hex,
@@ -342,7 +388,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					
 					return
 				
-				if len(targets) > 5:
+				if len(locations) > 5:
 					update.inline_query.answer(results=[
 						InlineQueryResultArticle(
 							id=uuid.uuid4().hex,
@@ -354,56 +400,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					
 					return
 				
-				results = []
-				for target in targets:
-					loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
-					observation = owmwmgr.weather_at_coords(target[4], target[5])
-					if observation is None:
-						logging.warning(
-							f"0 result from OpenWeatherMap API received {json.dumps({ 'location': loc_name, 'lat': target[4], 'lon': target[5] }, ensure_ascii=False)}")
-						update.inline_query.answer(results=[
-							InlineQueryResultArticle(
-								id=uuid.uuid4().hex,
-								title="沒有結果",
-								input_message_content=InputTextMessageContent("沒有結果"),
-								description="OWM目前不支持這個城市的天氣查詢"
-							)
-						], cache_time=3600)
-						
-						return
-					
-					weather: Weather = observation.weather
-					temp_data = weather.temperature(unit="celsius")
-					wind_data = weather.wind(unit="km_hour")
-					pressure = weather.barometric_pressure()
-					logging.info(f"Query sucessful {json.dumps({ 'location': loc_name }, ensure_ascii=False)}")
-					reply_text = textwrap.dedent(f"""\
-						*{loc_name} 天氣報告*
-						
-						*天氣狀況：*{weather.detailed_status}
-						*體感温度：*{temp_data["feels_like"]:.1f}°C
-						*實際温度：*{temp_data["temp"]:.1f}°C
-						*最高温度：*{temp_data["temp_max"]:.1f}°C
-						*最低温度：*{temp_data["temp_min"]:.1f}°C
-						*風速：*{wind_data["speed"]:.1f} km/h \\({wind_data["deg"]}°\\)
-						*濕度：*{weather.humidity}%
-						*雲量：*{weather.clouds}%
-						*大氣壓：*{pressure["press"]} hPa
-						*能見度：*{weather.visibility_distance / 1000} km
-						*過去1小時的降雨量：*{weather.rain.get("1h") or 0} mm""")
-					
-					reply_text = re.sub(r"([.-])", r"\\\1", reply_text)
-					
-					results.append(
-						InlineQueryResultArticle(
-							id=uuid.uuid4().hex,
-							title=loc_name,
-							input_message_content=InputTextMessageContent(message_text=reply_text, parse_mode=ParseMode.MARKDOWN_V2),
-							description=f'{temp_data["temp"]:.1f}°C'
-						)
-					)
-				
-				update.inline_query.answer(results, cache_time=300, auto_pagination=True)
+				update.inline_query.answer(make_owm_reply(locations), cache_time=300, auto_pagination=True)
 			
 			else:
 				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
@@ -413,6 +410,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 			update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
 
+# Build quote list from file `path`
 def build_quote_list(path: str):
 	global quotes
 	file_path = Path(path)
@@ -462,6 +460,7 @@ def build_quote_list(path: str):
 	logging.info(f"Built ACG quote list with {len(quotes[0])}+{len(quotes[1])}+{len(quotes[2])} elements respectively")
 
 
+# Build Pixiv ids index from file `path`
 def build_pixivid_list(path: str):
 	global bookmark_ids
 	file_path = Path(path)
@@ -530,8 +529,8 @@ def main():
 	updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
 	dispatcher: Dispatcher = updater.dispatcher
 	handlers = [
-		CommandHandler("s2t", handle_s2t),
-		CommandHandler("t2s", handle_t2s),
+		CommandHandler("s2t", lambda update, context: handle_trans_cc(update, context, s2tcon)),
+		CommandHandler("t2s", lambda update, context: handle_trans_cc(update, context, t2scon)),
 		CommandHandler("bot_log", handle_bot_log),
 		InlineQueryHandler(handle_inline_respond),
 		MessageHandler(Filters.command & ~Filters.update.edited_message, handle_cmd)
