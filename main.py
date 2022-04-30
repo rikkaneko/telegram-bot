@@ -43,6 +43,8 @@ from dotenv import load_dotenv
 load_dotenv()
 
 bot_id = os.getenv("TG_BOT_ID")
+start_time = datetime.now()
+log_file_path = f"telegram-bot-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 # OpenWeatherMap API (via pyowm)
 owm_config = OWMConfig.get_default_config()
 owm_config["language"] = "zh_tw"
@@ -59,30 +61,33 @@ t2scon = OpenCC("hk2s.json")
 
 # Global shared variables
 quotes: list[list[str]] = [[], [], []]
+total_quotes_count = 0
 bookmark_ids = []
 admins = []
-log_file_path = f"telegram-bot-{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
+
+# Counter
+query_count: dict[str, int] = {"pixiv": 0, "weather": 0}
 
 help_text = f"""\
-*使用說明*
+*＊ 使用說明 ＊*
 目前支持__6__種命令：
 
-*試試手氣* (0個參數)
+*＊ 試試手氣* (0個參數)
 `@{bot_id}`
 
-*來點色圖* (0個參數)
+*＊ 來點色圖* (0個參數)
 `@{bot_id}`
 
-*簡轉繁* (2個參數)
+*＊ 簡轉繁* (2個參數)
 `@{bot_id} s `<文字>
 
-*繁转简* (2個參數)
+*＊ 繁转简* (2個參數)
 `@{bot_id} t `<文字>
 
-*生成動漫梗* (1~3個參數)
+*＊ 生成動漫梗* (1~3個參數)
 `@{bot_id} q `[替換OO] [替換XX]
 
-*天氣報告* (2~4個參數)
+*＊ 天氣報告* (2~4個參數)
 `@{bot_id} w `<City>, [Country], [State]
 ＊ 目前只支持英文
 ＊ City: 城市名
@@ -124,6 +129,8 @@ def handle_cmd(update: Update, context: CallbackContext):
 		update.message.reply_text(text="哈囉～我是貓空～！", quote=True)
 	elif match_cmd(update.message, "say", True):
 		update.message.reply_text(text=quotes[0][random.randint(0, len(quotes[0]) - 1)], quote=True)
+	elif match_cmd(update.message, "stats", True):
+		handle_bot_stats(update, context)
 	elif match_cmd(update.message, None, True):
 		update.message.reply_text(text="Sorry～我不懂你在說啥呢～！", quote=True)
 
@@ -164,6 +171,19 @@ def handle_bot_log(update: Update, context: CallbackContext):
 			update.message.reply_text("不能看喔～", quote=True)
 
 
+def handle_bot_stats(update: Update, context: CallbackContext):
+	reply_text = textwrap.dedent(f"""\
+		*＊ {escape_markdown(bot_id, version=2)} 統計數據 ＊*
+		*＊ 運行時間:* {datetime.now() - start_time}
+		*＊ 色圖數量:* {len(bookmark_ids)}
+		*＊ ACG名言數量:* {total_quotes_count}
+		*＊ 色圖查詢次數:* {query_count.get("pixiv", 0)}
+		*＊ 天氣查詢次數:* {query_count.get("weather", 0)}
+		＊ 使用 /bot\\_log 下載運行日誌""")
+	reply_text = re.sub(r"([.-])", r"\\\1", reply_text)
+	update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2, quote=True)
+
+
 # Generate Quote lists based on current input `query_text`
 def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 	args = list(filter(None, re.split(r"\s+", query_text)))
@@ -194,7 +214,6 @@ def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 # Generate Pixiv illustration reply from `pixiv_id`
 def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
 	logging.info(f"Querying Pixiv illustration {json.dumps({ 'pixiv_id': pixiv_id })}")
-	retry_count = 0
 	result = api.illust_detail(pixiv_id)
 	illust = result.illust
 	if not illust:
@@ -204,6 +223,7 @@ def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
 		result = api.illust_detail(pixiv_id)
 	
 	if illust and illust.visible:
+		illust = result.illust
 		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': pixiv_id, 'title': illust.title }, ensure_ascii=False)}")
 		title = escape_markdown(illust.title, version=2)
 		author = escape_markdown(illust.user.name, version=2)
@@ -213,12 +233,13 @@ def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
 		標籤: """)
 		for tag in illust.tags:
 			# Replace some symbols that break hashtag
-			name = re.sub(r"\u30FB|\u2606|[-?!()/. ]", r"_", tag.name)
+			name = re.sub(r"\u30FB|\u2606|[-?!:()/. ]", r"_", tag.name)
 			caption_text += f"\\#{escape_markdown(name, version=2)} "
 		caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 		
 		keyboard = [[InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat="")]]
 		reply_markup = InlineKeyboardMarkup(keyboard)
+		query_count["pixiv"] += 1
 		
 		return InlineQueryResultPhoto(
 			id=uuid.uuid4().hex,
@@ -260,7 +281,8 @@ def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
 		loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
 		observation = owmwmgr.weather_at_coords(target[4], target[5])
 		if observation is None:
-			logging.warning(f"0 result from OpenWeatherMap API received {json.dumps({ 'location': loc_name, 'lat': target[4], 'lon': target[5] }, ensure_ascii=False)}")
+			logging.warning(f"0 result from OpenWeatherMap API received \
+				{json.dumps({ 'location': loc_name, 'lat': target[4], 'lon': target[5] }, ensure_ascii=False)}")
 			return [InlineQueryResultArticle(
 				id=uuid.uuid4().hex,
 				title="沒有結果",
@@ -298,6 +320,8 @@ def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
 				description=f'{temp_data["temp"]:.1f}°C'
 			)
 		)
+		
+		query_count["weather"] += 1
 	
 	return results
 
@@ -412,7 +436,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 
 # Build quote list from file `path`
 def build_quote_list(path: str):
-	global quotes
+	global quotes, total_quotes_count
 	file_path = Path(path)
 	# Download the file if not exist
 	if not file_path.exists():
@@ -457,7 +481,8 @@ def build_quote_list(path: str):
 			for [quote, param_count] in list(reader):
 				quotes[int(param_count)].append(quote)
 	
-	logging.info(f"Built ACG quote list with {len(quotes[0])}+{len(quotes[1])}+{len(quotes[2])} elements respectively")
+	total_quotes_count = len(quotes[0]) + len(quotes[1]) + len(quotes[2])
+	logging.info(f"Built ACG quote list with {total_quotes_count} elements")
 
 
 # Build Pixiv ids index from file `path`
@@ -490,7 +515,7 @@ def build_pixivid_list(path: str):
 			break
 		
 		next_qs = api.parse_qs(result.next_url)
-		sleep(random.randint(0, 4) + 1)
+		sleep(random.randint(0, 2))
 	
 	with open(file_path, "a") as f:
 		for pxid in reversed(newly_add_bookmarks):
@@ -521,7 +546,8 @@ def main():
 							logging.FileHandler(log_file_path, mode="w+"),
 							logging.StreamHandler()
 						])
-	logging.info(f"@{bot_id} is starting")
+	
+	logging.info(f"Bot {bot_id} is starting")
 	# Build lists
 	build_quote_list("moegirl-acg-quotes.csv")
 	build_pixivid_list("bookmarks.txt")
