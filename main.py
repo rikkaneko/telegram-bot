@@ -42,9 +42,17 @@ from dotenv import load_dotenv
 # Load environment variable from .env file
 load_dotenv()
 
+# Bot setting
 bot_id = os.getenv("TG_BOT_ID")
 start_time = datetime.now()
 log_file_path = f"telegram-bot-{start_time.strftime('%Y%m%d%H%M%S')}.log"
+file_path = {
+	"list-bookmark-id": "bookmarks.txt",
+	"list-acg-quote": "moegirl-acg-quotes.csv",
+	"list-admin": "admins.txt"
+}
+
+
 # OpenWeatherMap API (via pyowm)
 owm_config = OWMConfig.get_default_config()
 owm_config["language"] = "zh_tw"
@@ -184,6 +192,16 @@ def handle_bot_stats(update: Update, context: CallbackContext):
 	update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2, quote=True)
 
 
+def handle_update_bookmarks(update: Update, context: CallbackContext):
+	if update.message and update.message.chat.type == "private":
+		if update.message.from_user.id in admins:
+			msg: Message = context.bot.send_message(chat_id=update.effective_chat.id, text="正在更新 Pixiv 書籤索引")
+			n = fetch_latest_bookmarks()
+			context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"新增了{n}個新項目")
+		else:
+			update.message.reply_text("這個命令不能亂用喔～", quote=True)
+
+
 # Generate Quote lists based on current input `query_text`
 def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 	args = list(filter(None, re.split(r"\s+", query_text)))
@@ -241,12 +259,15 @@ def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
 		reply_markup = InlineKeyboardMarkup(keyboard)
 		query_count["pixiv"] += 1
 		
+		# Get image of higher quality
+		img_url = re.sub("c/600x1200_90/", "", illust.image_urls.large)
+		
 		return InlineQueryResultPhoto(
 			id=uuid.uuid4().hex,
 			title="來點色圖",
 			description=illust.title,
-			photo_url=illust.image_urls.large,
-			thumb_url=illust.image_urls.large,
+			photo_url=img_url,
+			thumb_url=illust.image_urls.square_medium,
 			caption=caption_text,
 			parse_mode=ParseMode.MARKDOWN_V2,
 			reply_markup=reply_markup
@@ -435,12 +456,14 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 
 
 # Build quote list from file `path`
-def build_quote_list(path: str):
+def build_quote_list():
 	global quotes, total_quotes_count
-	file_path = Path(path)
+	path = Path(file_path.get("list-acg-quote", "moegirl-acg-quotes.csv"))
 	# Download the file if not exist
-	if not file_path.exists():
+	if not path.exists():
 		response = requests.get("https://zh.moegirl.org.cn/index.php?title=Template:ACG%E7%BB%8F%E5%85%B8%E5%8F%B0%E8%AF%8D&action=edit")
+		# requests may not detect the correct encoding
+		response.encoding = 'UTF-8'
 		soup = BeautifulSoup(response.text, "html5lib")
 		content = soup.find("textarea", { "id": "wpTextbox1" }).text.strip()
 		
@@ -465,7 +488,7 @@ def build_quote_list(path: str):
 		
 		# Build quote list
 		fields = ["quote_text", "param_count"]
-		with open(file_path, "w") as f:
+		with open(path, "w") as f:
 			writer = csv.writer(f)
 			writer.writerow(fields)
 			for idx, quote_list in enumerate(quotes):
@@ -474,7 +497,7 @@ def build_quote_list(path: str):
 	
 	else:
 		# Read from local quote sources
-		with open(file_path, "r") as f:
+		with open(path, "r") as f:
 			reader = csv.reader(f)
 			# Skip header
 			next(reader, None)
@@ -485,19 +508,12 @@ def build_quote_list(path: str):
 	logging.info(f"Built ACG quote list with {total_quotes_count} elements")
 
 
-# Build Pixiv ids index from file `path`
-def build_pixivid_list(path: str):
+# Fetch the latest user bookmarked ids
+def fetch_latest_bookmarks() -> int:
 	global bookmark_ids
-	file_path = Path(path)
 	next_qs = { "user_id": os.getenv("PIXIV_USER_ID") }
 	should_break = False
-	
-	file_path.touch(exist_ok=True)
-	with open(file_path, "r") as f:
-		for line in f:
-			bookmark_ids.append(int(line.rstrip("\n")))
-	
-	newly_add_bookmarks = []
+	new_ids = []
 	while next_qs:
 		result = api.user_bookmarks_illust(**next_qs)
 		for illust in result.illusts:
@@ -509,7 +525,7 @@ def build_pixivid_list(path: str):
 				should_break = True
 				break
 			
-			newly_add_bookmarks.append(illust.id)
+			new_ids.append(illust.id)
 		
 		if should_break:
 			break
@@ -517,18 +533,34 @@ def build_pixivid_list(path: str):
 		next_qs = api.parse_qs(result.next_url)
 		sleep(random.randint(0, 2))
 	
-	with open(file_path, "a") as f:
-		for pxid in reversed(newly_add_bookmarks):
+	with open(file_path.get("list-bookmark-id", "bookmarks.txt"), "a") as f:
+		for pxid in reversed(new_ids):
 			bookmark_ids.append(pxid)
 			f.write(f"{pxid}\n")
 	
+	return len(new_ids)
+
+
+# Build Pixiv ids index from file `path`
+def build_pixivid_list():
+	global bookmark_ids
+	path = Path(file_path.get("list-bookmark-id", "bookmarks.txt"))
+	path.touch(exist_ok=True)
+	with open(path, "r") as f:
+		# Scan the whole file to build the index
+		for line in f:
+			bookmark_ids.append(int(line.rstrip("\n")))
+	
+	n = fetch_latest_bookmarks()
+	
+	logging.info(f"Added {n} new elements")
 	logging.info(f"Built pixiv list with {len(bookmark_ids)} elements")
 
 
-def build_admin_list(path: str):
-	file_path = Path(path)
-	file_path.touch(exist_ok=True)
-	with open(file_path, "r") as f:
+def build_admin_list():
+	path = Path(file_path.get("list-admin", "admins.txt"))
+	path.touch(exist_ok=True)
+	with open(path, "r") as f:
 		for line in f:
 			admins.append(int(line.rstrip("\n")))
 	
@@ -549,15 +581,16 @@ def main():
 	
 	logging.info(f"Bot {bot_id} is starting")
 	# Build lists
-	build_quote_list("moegirl-acg-quotes.csv")
-	build_pixivid_list("bookmarks.txt")
-	build_admin_list("admins.txt")
+	build_quote_list()
+	build_pixivid_list()
+	build_admin_list()
 	updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
 	dispatcher: Dispatcher = updater.dispatcher
 	handlers = [
 		CommandHandler("s2t", lambda update, context: handle_trans_cc(update, context, s2tcon)),
 		CommandHandler("t2s", lambda update, context: handle_trans_cc(update, context, t2scon)),
 		CommandHandler("bot_log", handle_bot_log),
+		CommandHandler("update_bookmarks", handle_update_bookmarks),
 		InlineQueryHandler(handle_inline_respond),
 		MessageHandler(Filters.command & ~Filters.update.edited_message, handle_cmd)
 	]
