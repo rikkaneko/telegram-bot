@@ -25,6 +25,7 @@ import textwrap
 from datetime import datetime
 from pathlib import Path
 from time import sleep
+from logging.handlers import RotatingFileHandler
 
 import requests
 from bs4 import BeautifulSoup
@@ -33,6 +34,7 @@ from pyowm import OWM
 from pyowm.utils import config as OWMConfig
 from pyowm.weatherapi25.weather import Weather
 from pixivpy3 import AppPixivAPI
+from pixivpy3.utils import JsonDict
 from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, InlineKeyboardMarkup, InlineKeyboardButton, InputTextMessageContent, \
 	Message, ParseMode
 from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, Filters
@@ -45,11 +47,11 @@ load_dotenv()
 # Bot setting
 bot_id = os.getenv("TG_BOT_ID")
 start_time = datetime.now()
-log_file_path = f"telegram-bot-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 file_path = {
 	"list-bookmark-id": "bookmarks.txt",
 	"list-acg-quote": "moegirl-acg-quotes.csv",
-	"list-admin": "admins.txt"
+	"list-admin": "admins.txt",
+	"log-file": f"{bot_id}-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 }
 
 
@@ -78,13 +80,16 @@ query_count: dict[str, int] = {"pixiv": 0, "weather": 0}
 
 help_text = f"""\
 *＊ 使用說明 ＊*
-目前支持__6__種命令：
+目前支持__7__種命令：
 
 *＊ 試試手氣* (0個參數)
 `@{bot_id}`
 
 *＊ 來點色圖* (0個參數)
 `@{bot_id}`
+
+*＊ 相關色圖* (1個參數)
+`@{bot_id} r `<Pixiv ID>
 
 *＊ 簡轉繁* (2個參數)
 `@{bot_id} s `<文字>
@@ -134,7 +139,7 @@ def handle_cmd(update: Update, context: CallbackContext):
 	logging.info(
 		f"Received command {json.dumps({ 'from_user': { 'id': user.id, 'username': user.name }, 'text': update.message.text }, ensure_ascii=False)}")
 	if match_cmd(update.message, "start", True):
-		update.message.reply_text(text="哈囉～我是貓空～！", quote=True)
+		update.message.reply_text(text=f"哈囉～我是 {bot_id} ～！", quote=True)
 	elif match_cmd(update.message, "say", True):
 		update.message.reply_text(text=quotes[0][random.randint(0, len(quotes[0]) - 1)], quote=True)
 	elif match_cmd(update.message, "stats", True):
@@ -174,7 +179,7 @@ def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC
 def handle_bot_log(update: Update, context: CallbackContext):
 	if update.message and update.message.chat.type == "private":
 		if update.message.from_user.id in admins:
-			update.message.reply_document(document=open(log_file_path, "r"), quote=True)
+			update.message.reply_document(document=open(file_path["log-file"], "r"), quote=True)
 		else:
 			update.message.reply_text("不能看喔～", quote=True)
 
@@ -197,7 +202,7 @@ def handle_update_bookmarks(update: Update, context: CallbackContext):
 		if update.message.from_user.id in admins:
 			msg: Message = context.bot.send_message(chat_id=update.effective_chat.id, text="正在更新 Pixiv 書籤索引")
 			n = fetch_latest_bookmarks()
-			context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"新增了{n}個新項目")
+			context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id, text=f"新增了 {n} 個新項目")
 		else:
 			update.message.reply_text("這個命令不能亂用喔～", quote=True)
 
@@ -230,19 +235,28 @@ def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 
 
 # Generate Pixiv illustration reply from `pixiv_id`
-def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
-	logging.info(f"Querying Pixiv illustration {json.dumps({ 'pixiv_id': pixiv_id })}")
-	result = api.illust_detail(pixiv_id)
-	illust = result.illust
-	if not illust:
-		# Refresh token once if failed
-		logging.info(f"Pixiv token may expired, attempt to refresh...")
-		api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
-		result = api.illust_detail(pixiv_id)
+def make_pixiv_illust_reply(pixiv_id: int | None = None, illust: JsonDict | None = None) -> InlineQueryResultPhoto | None:
+	if pixiv_id is None and illust is None:
+		logging.error(f"Detected incorrect usage, either pixiv_id or illust must provide value")
+		return
 	
-	if illust and illust.visible:
+	if pixiv_id is not None:
+		logging.info(f"Querying Pixiv illustration {json.dumps({ 'pixiv_id': pixiv_id })}")
+		result = api.illust_detail(pixiv_id)
 		illust = result.illust
-		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': pixiv_id, 'title': illust.title }, ensure_ascii=False)}")
+		if not illust:
+			# Refresh token once if failed
+			logging.info(f"Pixiv token may expired, attempt to refresh...")
+			api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+			result = api.illust_detail(pixiv_id)
+			illust = result.illust
+	
+	if illust:
+		if not illust.visible:
+			logging.info(f"Queried ID exists but not currently accessible {json.dumps({ 'pixiv_id': illust.id })}")
+			return
+			
+		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': illust.id, 'title': illust.title }, ensure_ascii=False)}")
 		title = escape_markdown(illust.title, version=2)
 		author = escape_markdown(illust.user.name, version=2)
 		caption_text = textwrap.dedent(f"""\
@@ -255,7 +269,10 @@ def make_pixiv_illust_reply(pixiv_id: int) -> InlineQueryResultPhoto:
 			caption_text += f"\\#{escape_markdown(name, version=2)} "
 		caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 		
-		keyboard = [[InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat="")]]
+		keyboard = [[
+			InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat=""),
+			InlineKeyboardButton(text="相關作品", switch_inline_query_current_chat=f"r {illust.id}")
+		]]
 		reply_markup = InlineKeyboardMarkup(keyboard)
 		query_count["pixiv"] += 1
 		
@@ -281,7 +298,7 @@ def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArtic
 	# Retry up to 3 times
 	for retry_count in range(1, 4):
 		pxid = bookmark_ids[random.randint(0, len(bookmark_ids) - 1)]
-		reply_image = make_pixiv_illust_reply(pxid)
+		reply_image = make_pixiv_illust_reply(pixiv_id=pxid)
 		if reply_image:
 			return reply_image
 		logging.warning(f"Retrying pixiv query for the {retry_count} of 3 times {json.dumps({ 'pixiv_id': pxid })}")
@@ -291,8 +308,29 @@ def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArtic
 	return InlineQueryResultArticle(
 		id=uuid.uuid4().hex,
 		title="找不到色圖",
-		input_message_content=InputTextMessageContent("找不到色圖")
+		input_message_content=InputTextMessageContent("沒有結果")
 	)
+
+
+# Fetch related Pixiv illustration
+def get_related_pixiv_illust(pxid: int) -> [InlineQueryResultPhoto]:
+	result = api.illust_related(pxid)
+	replies = []
+	if not result.illusts:
+		# Refresh token once if failed
+		logging.info(f"Pixiv token may expired, attempt to refresh...")
+		api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+		result = api.illust_related(pxid)
+	
+	if not result.illusts:
+		return replies
+	
+	for illust in result.illusts:
+		i = make_pixiv_illust_reply(illust=illust)
+		if i is not None:
+			replies.append(i)
+	
+	return replies
 
 
 # Generate weather reply based on given `locations`
@@ -451,6 +489,25 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 				return
 		
+		case 'r':
+			if len(query) > 2 and query[1] == ' ':
+				try:
+					pxid = int(query[2:])
+					results = get_related_pixiv_illust(pxid)
+					if results:
+						update.inline_query.answer(results=results, cache_time=300, auto_pagination=True)
+					else:
+						update.inline_query.answer(results=[
+							InlineQueryResultArticle(
+								id=uuid.uuid4().hex,
+								title="找不到相關色圖",
+								input_message_content=InputTextMessageContent("沒有結果")
+							)], cache_time=300, auto_pagination=True)
+					
+				except ValueError:
+					update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+					return
+		
 		case _:
 			update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
@@ -458,7 +515,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 # Build quote list from file `path`
 def build_quote_list():
 	global quotes, total_quotes_count
-	path = Path(file_path.get("list-acg-quote", "moegirl-acg-quotes.csv"))
+	path = Path(file_path["list-acg-quote"])
 	# Download the file if not exist
 	if not path.exists():
 		response = requests.get("https://zh.moegirl.org.cn/index.php?title=Template:ACG%E7%BB%8F%E5%85%B8%E5%8F%B0%E8%AF%8D&action=edit")
@@ -516,6 +573,12 @@ def fetch_latest_bookmarks() -> int:
 	new_ids = []
 	while next_qs:
 		result = api.user_bookmarks_illust(**next_qs)
+		if not result.illusts:
+			# Refresh token once if failed
+			logging.info(f"Pixiv token may expired, attempt to refresh...")
+			api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
+			result = api.user_bookmarks_illust(**next_qs)
+		
 		for illust in result.illusts:
 			# Skip if the illustration not accessible
 			if not illust.visible:
@@ -533,7 +596,7 @@ def fetch_latest_bookmarks() -> int:
 		next_qs = api.parse_qs(result.next_url)
 		sleep(random.randint(0, 2))
 	
-	with open(file_path.get("list-bookmark-id", "bookmarks.txt"), "a") as f:
+	with open(file_path["list-bookmark-id"], "a") as f:
 		for pxid in reversed(new_ids):
 			bookmark_ids.append(pxid)
 			f.write(f"{pxid}\n")
@@ -544,7 +607,7 @@ def fetch_latest_bookmarks() -> int:
 # Build Pixiv ids index from file `path`
 def build_pixivid_list():
 	global bookmark_ids
-	path = Path(file_path.get("list-bookmark-id", "bookmarks.txt"))
+	path = Path(file_path["list-bookmark-id"])
 	path.touch(exist_ok=True)
 	with open(path, "r") as f:
 		# Scan the whole file to build the index
@@ -558,7 +621,7 @@ def build_pixivid_list():
 
 
 def build_admin_list():
-	path = Path(file_path.get("list-admin", "admins.txt"))
+	path = Path(file_path["list-admin"])
 	path.touch(exist_ok=True)
 	with open(path, "r") as f:
 		for line in f:
@@ -571,13 +634,14 @@ def build_admin_list():
 
 
 def main():
-	logging.basicConfig(format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)s]: %(funcName)s - %(message)s",
-						level=logging.INFO,
-						datefmt="%Y-%m-%dT%H:%M:%S%z",
-						handlers=[
-							logging.FileHandler(log_file_path, mode="w+"),
-							logging.StreamHandler()
-						])
+	logging.basicConfig(
+		format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)s]: %(funcName)s - %(message)s",
+		level=logging.INFO,
+		datefmt="%Y-%m-%dT%H:%M:%S%z",
+		handlers=[
+			RotatingFileHandler(file_path["log-file"], mode="w+", maxBytes=5*1024*1024, backupCount=2),
+			logging.StreamHandler()
+		])
 	
 	logging.info(f"Bot {bot_id} is starting")
 	# Build lists
