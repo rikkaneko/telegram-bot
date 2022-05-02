@@ -54,7 +54,6 @@ file_path = {
 	"log-file": f"{bot_id}-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 }
 
-
 # OpenWeatherMap API (via pyowm)
 owm_config = OWMConfig.get_default_config()
 owm_config["language"] = "zh_tw"
@@ -76,7 +75,7 @@ bookmark_ids = []
 admins = []
 
 # Counter
-query_count: dict[str, int] = {"pixiv": 0, "weather": 0}
+query_count: dict[str, int] = { "pixiv": 0, "weather": 0 }
 
 help_text = f"""\
 *＊ 使用說明 ＊*
@@ -174,7 +173,7 @@ def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC
 		message_id = update.edited_message.message_id
 		reply_text = cc_profile.convert(text)
 		context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id], text=reply_text)
-		
+
 
 def handle_bot_log(update: Update, context: CallbackContext):
 	if update.message and update.message.chat.type == "private":
@@ -236,8 +235,8 @@ def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 
 # Generate Pixiv illustration reply from `pixiv_id`
 def make_pixiv_illust_reply(pixiv_id: int | None = None, illust: JsonDict | None = None) -> InlineQueryResultPhoto | None:
-	if pixiv_id is None and illust is None:
-		logging.error(f"Detected incorrect usage, either pixiv_id or illust must provide value")
+	if (pixiv_id is None) == (illust is None):
+		logging.error(f"Detected incorrect usage, either pixiv_id or illust should provide value")
 		return
 	
 	if pixiv_id is not None:
@@ -255,8 +254,9 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None, illust: JsonDict | None
 		if not illust.visible:
 			logging.info(f"Queried ID exists but not currently accessible {json.dumps({ 'pixiv_id': illust.id })}")
 			return
-			
-		logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': illust.id, 'title': illust.title }, ensure_ascii=False)}")
+		
+		if pixiv_id is not None:
+			logging.info(f"Query sucessful {json.dumps({ 'pixiv_id': pixiv_id, 'title': illust.title }, ensure_ascii=False)}")
 		title = escape_markdown(illust.title, version=2)
 		author = escape_markdown(illust.user.name, version=2)
 		caption_text = textwrap.dedent(f"""\
@@ -408,7 +408,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 		# Get help
 		case 'h':
 			update.inline_query.answer([help_inline_reply], auto_pagination=True, cache_time=3600)
-			
+		
 		# Get quotes
 		case 'q':
 			results = make_quote_reply(query[1:])
@@ -503,7 +503,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 								title="找不到相關色圖",
 								input_message_content=InputTextMessageContent("沒有結果")
 							)], cache_time=300, auto_pagination=True)
-					
+				
 				except ValueError:
 					update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 					return
@@ -639,7 +639,7 @@ def main():
 		level=logging.INFO,
 		datefmt="%Y-%m-%dT%H:%M:%S%z",
 		handlers=[
-			RotatingFileHandler(file_path["log-file"], mode="w+", maxBytes=5*1024*1024, backupCount=2),
+			RotatingFileHandler(file_path["log-file"], mode="w+", maxBytes=5 * 1024 * 1024, backupCount=2),
 			logging.StreamHandler()
 		])
 	
