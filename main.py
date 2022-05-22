@@ -79,7 +79,7 @@ query_count: dict[str, int] = { "pixiv": 0, "weather": 0 }
 
 help_text = f"""\
 *＊ 使用說明 ＊*
-目前支持__7__種命令：
+目前支持__8__種命令：
 
 *＊ 試試手氣* (0個參數)
 `@{bot_id}`
@@ -87,7 +87,7 @@ help_text = f"""\
 *＊ 來點色圖* (0個參數)
 `@{bot_id}`
 
-*＊ 相關色圖* (1個參數)
+*＊ 相關色圖* (2個參數)
 `@{bot_id} r `<Pixiv ID>
 
 *＊ 簡轉繁* (2個參數)
@@ -99,13 +99,16 @@ help_text = f"""\
 *＊ 生成動漫梗* (1~3個參數)
 `@{bot_id} q `[替換OO] [替換XX]
 
-*＊ 天氣報告* (2~4個參數)
+*＊ 天氣報告* (3~5個參數)
 `@{bot_id} w `<City>, [Country], [State]
 ＊ 目前只支持英文
 ＊ City: 城市名
 ＊ Country: 2位字元的地區編碼
 ＊ State: 2位字元的州份編碼
 ＊ 範例：Shanghai, CN
+
+*＊ 抓取 Twitter 原圖* (2個參數)
+`@{bot_id} m `<Twitter連結/ID>
 """
 
 help_text = re.sub(r"([()<>\[\]~])", r"\\\1", help_text)
@@ -385,6 +388,45 @@ def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
 	return results
 
 
+# Generate downloadable illustration link reply
+def make_twi_reply(twid: int) -> InlineQueryResultArticle | None:
+	url = f"https://cdn.syndication.twimg.com/tweet?id={twid}"
+	response = requests.get(url)
+	# requests may not detect the correct encoding
+	response.encoding = 'UTF-8'
+	reply = response.text
+	try:
+		reply_dict: dict = json.loads(reply)
+		illust_urls = reply_dict.get("photos", [])
+		author = escape_markdown(reply_dict["user"]["name"], version=2)
+		username = reply_dict["user"]["screen_name"]
+		thumb_url = reply_dict["user"]["profile_image_url_https"]
+		text = escape_markdown(reply_dict["text"], version=2)
+		reply_text = textwrap.dedent(f"""
+			*作者：*[{author}](https://twitter.com/{reply_dict["user"]["screen_name"]})
+			*內容：*{text}
+			
+		""")
+		
+		if illust_urls:
+			reply_text += "*插圖：*"
+			thumb_url = illust_urls[0]["url"]
+		
+		for idx, illust in enumerate(illust_urls):
+			reply_text += f"[\\[{idx}\\]]({illust['url']}) "
+		
+		return InlineQueryResultArticle(
+			id=uuid.uuid4().hex,
+			title=reply_dict["user"]["name"],
+			description=reply_dict["text"],
+			thumb_url=thumb_url,
+			input_message_content=InputTextMessageContent(message_text=reply_text, parse_mode=ParseMode.MARKDOWN_V2)
+		)
+	
+	except ValueError:
+		return None
+
+
 def handle_inline_respond(update: Update, context: CallbackContext):
 	query = update.inline_query.query.strip()
 	user = update.inline_query.from_user
@@ -508,6 +550,34 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 					update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 					return
 		
+		case 'm':
+			if len(query) > 2 and query[1] == ' ':
+				twid: int
+				try:
+					twid = int(query[2:])
+					
+				except ValueError:
+					matches = re.match(r"(?:https://)?(?:\w+\.)?twitter\.com/(\w+)/status/(\d+)", query[2:])
+					if matches is not None:
+						twid = matches.group(2)
+					else:
+						update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+						return
+					
+				result = make_twi_reply(twid)
+				if result:
+					update.inline_query.answer(results=[result], cache_time=3600)
+				else:
+					update.inline_query.answer(results=[
+						InlineQueryResultArticle(
+							id=uuid.uuid4().hex,
+							title="找不到相關 Tweet",
+							input_message_content=InputTextMessageContent("沒有結果")
+						)], cache_time=300)
+			
+			else:
+				update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+			
 		case _:
 			update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
