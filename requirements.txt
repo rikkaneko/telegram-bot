@@ -5,3 +5,4 @@ pixivpy~=3.7.0
 python-telegram-bot==13.14
 requests==2.28.1
 python-dotenv==0.21.0
+html5lib==1.1
