@@ -48,12 +48,13 @@ load_dotenv()
 
 # Bot setting
 bot_id = os.getenv("TG_BOT_ID")
+base_data_dir = "data"
 start_time = datetime.now()
 file_path = {
-  "list-bookmark-id": "bookmarks.txt",
-  "list-acg-quote": "moegirl-acg-quotes.csv",
-  "list-admin": "admins.txt",
-  "log-file": f"{bot_id}-{start_time.strftime('%Y%m%d%H%M%S')}.log"
+  "list-bookmark-id": f"{base_data_dir}/bookmarks.txt",
+  "list-acg-quote": f"{base_data_dir}/moegirl-acg-quotes.csv",
+  "list-admin": f"{base_data_dir}/admins.txt",
+  "log-file": f"{base_data_dir}/{bot_id}-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 }
 
 # OpenWeatherMap API (via pyowm)
