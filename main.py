@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from time import sleep
 from logging.handlers import RotatingFileHandler
+from typing import List
 
 import requests
 from bs4 import BeautifulSoup
@@ -35,12 +36,25 @@ from pyowm.utils import config as OWMConfig
 from pyowm.weatherapi25.weather import Weather
 from pixivpy3 import AppPixivAPI
 from pixivpy3.utils import JsonDict
-from telegram import Update, InlineQueryResultArticle, InlineQueryResultPhoto, InlineKeyboardMarkup, \
-  InlineKeyboardButton, InputTextMessageContent, \
-  Message, ParseMode
-from telegram.ext import Updater, Dispatcher, CallbackContext, CommandHandler, MessageHandler, InlineQueryHandler, \
-  Filters
-from telegram.utils.helpers import escape_markdown
+from telegram import (
+    Update,
+    InlineQueryResultArticle,
+    InlineQueryResultPhoto,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    InputTextMessageContent,
+    Message,
+  )
+from telegram.ext import (
+  Application,
+  CallbackContext,
+  CommandHandler,
+  MessageHandler,
+  InlineQueryHandler,
+  filters
+)
+from telegram.constants import ParseMode
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 
 # Load environment variable from .env file
@@ -70,6 +84,9 @@ api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
 # OpenCC
 s2tcon = OpenCC("s2hk.json")
 t2scon = OpenCC("hk2s.json")
+
+# logger
+log = logging.getLogger(__name__)
 
 # Global shared variables
 quotes: list[list[str]] = [[], [], []]
@@ -139,21 +156,21 @@ def match_cmd(message: Message, cmd: str | None, required_bot_name: bool = True)
   return False
 
 
-def handle_cmd(update: Update, context: CallbackContext):
+async def handle_cmd(update: Update, context: CallbackContext):
   user = update.message.from_user
-  logging.info(
+  log.info(
     f"Received command {json.dumps({'from_user': {'id': user.id, 'username': user.name}, 'text': update.message.text}, ensure_ascii=False)}")
   if match_cmd(update.message, "start", True):
-    update.message.reply_text(text=f"哈囉～我是 {bot_id} ～！", quote=True)
+    await update.message.reply_text(text=f"哈囉～我是 {bot_id} ～！", quote=True)
   elif match_cmd(update.message, "say", True):
-    update.message.reply_text(text=quotes[0][random.randint(0, len(quotes[0]) - 1)], quote=True)
+    await update.message.reply_text(text=quotes[0][random.randint(0, len(quotes[0]) - 1)], quote=True)
   elif match_cmd(update.message, "stats", True):
-    handle_bot_stats(update, context)
+    await handle_bot_stats(update, context)
   elif match_cmd(update.message, None, True):
-    update.message.reply_text(text="Sorry～我不懂你在說啥呢～！", quote=True)
+    await update.message.reply_text(text="Sorry～我不懂你在說啥呢～！", quote=True)
 
 
-def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC):
+async def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC):
   # Call with arguments
   if update.message is not None:
     text = "".join(context.args)
@@ -161,13 +178,13 @@ def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC
     if not text:
       if update.message.reply_to_message is not None:
         reply_text = cc_profile.convert(update.message.reply_to_message.text)
-        update.message.reply_text(text=reply_text, quote=True)
+        await update.message.reply_text(text=reply_text, quote=True)
       return
 
     message_id = update.message.message_id
     reply_text = cc_profile.convert(text)
     # Message id of the response message
-    replied: Message = context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
+    replied: Message = await context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
     # TODO Make user_data persistence
     context.user_data[message_id] = replied.message_id
 
@@ -178,19 +195,19 @@ def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC
 
     message_id = update.edited_message.message_id
     reply_text = cc_profile.convert(text)
-    context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id],
+    await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id],
                                   text=reply_text)
 
 
-def handle_bot_log(update: Update, context: CallbackContext):
+async def handle_bot_log(update: Update, context: CallbackContext):
   if update.message and update.message.chat.type == "private":
     if update.message.from_user.id in admins:
-      update.message.reply_document(document=open(file_path["log-file"], "r"), quote=True)
+      await update.message.reply_document(document=open(file_path["log-file"], "r"), quote=True)
     else:
-      update.message.reply_text("不能看喔～", quote=True)
+      await update.message.reply_text("不能看喔～", quote=True)
 
 
-def handle_bot_stats(update: Update, context: CallbackContext):
+async def handle_bot_stats(update: Update, context: CallbackContext):
   reply_text = textwrap.dedent(f"""\
     *＊ {escape_markdown(bot_id, version=2)} 統計數據 ＊*
     *＊ 運行時間:* {datetime.now() - start_time}
@@ -200,22 +217,22 @@ def handle_bot_stats(update: Update, context: CallbackContext):
     *＊ 天氣查詢次數:* {query_count.get("weather", 0)}
     ＊ 使用 /bot\\_log 下載運行日誌""")
   reply_text = re.sub(r"([.-])", r"\\\1", reply_text)
-  update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2, quote=True)
+  await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2, quote=True)
 
 
-def handle_update_bookmarks(update: Update, context: CallbackContext):
+async def handle_update_bookmarks(update: Update, context: CallbackContext):
   if update.message and update.message.chat.type == "private":
     if update.message.from_user.id in admins:
-      msg: Message = context.bot.send_message(chat_id=update.effective_chat.id, text="正在更新 Pixiv 書籤索引")
+      msg: Message = await context.bot.send_message(chat_id=update.effective_chat.id, text="正在更新 Pixiv 書籤索引")
       n = fetch_latest_bookmarks()
-      context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id,
+      await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=msg.message_id,
                                     text=f"新增了 {n} 個新項目")
     else:
-      update.message.reply_text("這個命令不能亂用喔～", quote=True)
+      await update.message.reply_text("這個命令不能亂用喔～", quote=True)
 
 
 # Generate Quote lists based on current input `query_text`
-def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
+def make_quote_reply(query_text: str) -> List[InlineQueryResultArticle]:
   args = list(filter(None, re.split(r"\s+", query_text)))
   argc = len(args)
   results = []
@@ -245,27 +262,27 @@ def make_quote_reply(query_text: str) -> [InlineQueryResultArticle]:
 def make_pixiv_illust_reply(pixiv_id: int | None = None,
                             illust: JsonDict | None = None) -> InlineQueryResultPhoto | None:
   if (pixiv_id is None) == (illust is None):
-    logging.error(f"Detected incorrect usage, either pixiv_id or illust should provide value")
+    log.error("Detected incorrect usage, either pixiv_id or illust should provide value")
     return
 
   if pixiv_id is not None:
-    logging.info(f"Querying Pixiv illustration {json.dumps({'pixiv_id': pixiv_id})}")
+    log.info(f"Querying Pixiv illustration {json.dumps({'pixiv_id': pixiv_id})}")
     result = api.illust_detail(pixiv_id)
     illust = result.illust
     if not illust:
       # Refresh token once if failed
-      logging.info(f"Pixiv token may expired, attempt to refresh...")
+      log.info("Pixiv token may expired, attempt to refresh...")
       api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
       result = api.illust_detail(pixiv_id)
       illust = result.illust
 
   if illust:
     if not illust.visible:
-      logging.info(f"Queried ID exists but not currently accessible {json.dumps({'pixiv_id': illust.id})}")
+      log.info(f"Queried ID exists but not currently accessible {json.dumps({'pixiv_id': illust.id})}")
       return
 
     if pixiv_id is not None:
-      logging.info(f"Query sucessful {json.dumps({'pixiv_id': pixiv_id, 'title': illust.title}, ensure_ascii=False)}")
+      log.info(f"Query sucessful {json.dumps({'pixiv_id': pixiv_id, 'title': illust.title}, ensure_ascii=False)}")
     title = escape_markdown(illust.title, version=2)
     author = escape_markdown(illust.user.name, version=2)
     caption_text = textwrap.dedent(f"""\
@@ -299,7 +316,7 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
       reply_markup=reply_markup
     )
 
-  logging.error(f"Query failed {json.dumps({'pixiv_id': pixiv_id})}")
+  log.error(f"Query failed {json.dumps({'pixiv_id': pixiv_id})}")
 
 
 # Fetch random Pixiv illustration
@@ -310,9 +327,9 @@ def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArtic
     reply_image = make_pixiv_illust_reply(pixiv_id=pxid)
     if reply_image:
       return reply_image
-    logging.warning(f"Retrying pixiv query for the {retry_count} of 3 times {json.dumps({'pixiv_id': pxid})}")
+    log.warning(f"Retrying pixiv query for the {retry_count} of 3 times {json.dumps({'pixiv_id': pxid})}")
 
-  logging.warning(f"Retry limit reached")
+  log.warning("Retry limit reached")
   # Feedback reply
   return InlineQueryResultArticle(
     id=uuid.uuid4().hex,
@@ -322,12 +339,12 @@ def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArtic
 
 
 # Fetch related Pixiv illustration
-def get_related_pixiv_illust(pxid: int) -> [InlineQueryResultPhoto]:
+def get_related_pixiv_illust(pxid: int) -> List[InlineQueryResultPhoto]:
   result = api.illust_related(pxid)
   replies = []
   if not result.illusts:
     # Refresh token once if failed
-    logging.info(f"Pixiv token may expired, attempt to refresh...")
+    log.info("Pixiv token may expired, attempt to refresh...")
     api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
     result = api.illust_related(pxid)
 
@@ -343,13 +360,13 @@ def get_related_pixiv_illust(pxid: int) -> [InlineQueryResultPhoto]:
 
 
 # Generate weather reply based on given `locations`
-def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
+async def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
   results = []
   for target in locations:
     loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
     observation = owmwmgr.weather_at_coords(target[4], target[5])
     if observation is None:
-      logging.warning(f"0 result from OpenWeatherMap API received \
+      log.warning(f"0 result from OpenWeatherMap API received \
         {json.dumps({'location': loc_name, 'lat': target[4], 'lon': target[5]}, ensure_ascii=False)}")
       return [InlineQueryResultArticle(
         id=uuid.uuid4().hex,
@@ -362,7 +379,7 @@ def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
     temp_data = weather.temperature(unit="celsius")
     wind_data = weather.wind(unit="km_hour")
     pressure = weather.barometric_pressure()
-    logging.info(f"Query sucessful {json.dumps({'location': loc_name}, ensure_ascii=False)}")
+    log.info(f"Query sucessful {json.dumps({'location': loc_name}, ensure_ascii=False)}")
     reply_text = textwrap.dedent(f"""\
       *{loc_name} 天氣報告*
       
@@ -405,7 +422,6 @@ def make_twi_reply(twid: int) -> InlineQueryResultArticle | None:
     reply_dict: dict = json.loads(reply)
     illust_urls = reply_dict.get("photos", [])
     author = escape_markdown(reply_dict["user"]["name"], version=2)
-    username = reply_dict["user"]["screen_name"]
     thumb_url = reply_dict["user"]["profile_image_url_https"]
     text = escape_markdown(reply_dict["text"], version=2)
     reply_text = textwrap.dedent(f"""
@@ -433,16 +449,16 @@ def make_twi_reply(twid: int) -> InlineQueryResultArticle | None:
     return None
 
 
-def handle_inline_respond(update: Update, context: CallbackContext):
+async def handle_inline_respond(update: Update, context: CallbackContext):
   query = update.inline_query.query.strip()
   user = update.inline_query.from_user
-  logging.info(
+  log.info(
     f"Received user query {json.dumps({'from_user': {'id': user.id, 'username': user.name}, 'query_text': query}, ensure_ascii=False)}")
   if not query:
     reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
     reply_image = get_random_pixiv_illust()
 
-    update.inline_query.answer(results=[
+    await update.inline_query.answer(results=[
       reply_image,
       InlineQueryResultArticle(
         id=uuid.uuid4().hex,
@@ -455,18 +471,18 @@ def handle_inline_respond(update: Update, context: CallbackContext):
   match query[0]:
     # Get help
     case 'h':
-      update.inline_query.answer([help_inline_reply], auto_pagination=True, cache_time=3600)
+      await update.inline_query.answer([help_inline_reply], auto_pagination=True, cache_time=3600)
 
     # Get quotes
     case 'q':
       results = make_quote_reply(query[1:])
-      update.inline_query.answer(results, auto_pagination=True, cache_time=3600)
+      await update.inline_query.answer(results, auto_pagination=True, cache_time=3600)
 
     # Simplified-Traditional Chinese translate
     case 's':
       if len(query) > 2 and query[1] == ' ':
         reply_text = s2tcon.convert(query[2:].strip())
-        update.inline_query.answer(results=[
+        await update.inline_query.answer(results=[
           InlineQueryResultArticle(
             id=uuid.uuid4().hex,
             title="簡轉繁",
@@ -475,13 +491,13 @@ def handle_inline_respond(update: Update, context: CallbackContext):
           )], cache_time=3600)
 
       else:
-        update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
     # Traditional-Simplified Chinese translate
     case 't':
       if len(query) > 2 and query[1] == ' ':
         reply_text = t2scon.convert(query[2:].strip())
-        update.inline_query.answer(results=[
+        await update.inline_query.answer(results=[
           InlineQueryResultArticle(
             id=uuid.uuid4().hex,
             title="繁转简",
@@ -490,7 +506,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
           )], cache_time=3600)
 
       else:
-        update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
     # Get weather forecast
     case 'w':
@@ -500,16 +516,16 @@ def handle_inline_respond(update: Update, context: CallbackContext):
         if argc == 0 or argc > 3 or \
             (argc == 2 and len(city_loc[1]) != 2) or \
             (argc == 3 and (len(city_loc[1]) != 2 or len(city_loc[2]) != 2)):
-          update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+          await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
           return
 
         city_ids = owm.city_id_registry()
         locations = city_ids.ids_for(*city_loc, matching="like")
-        logging.info(
+        log.info(
           f"Found {len(locations)} locations for {json.dumps({'query_text': query[2:].strip()}, ensure_ascii=False)}")
         # Only not more than 8 results
         if len(locations) == 0:
-          update.inline_query.answer(results=[
+          await update.inline_query.answer(results=[
             InlineQueryResultArticle(
               id=uuid.uuid4().hex,
               title="沒有結果",
@@ -521,7 +537,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
           return
 
         if len(locations) > 5:
-          update.inline_query.answer(results=[
+          await update.inline_query.answer(results=[
             InlineQueryResultArticle(
               id=uuid.uuid4().hex,
               title="結果太多",
@@ -532,10 +548,10 @@ def handle_inline_respond(update: Update, context: CallbackContext):
 
           return
 
-        update.inline_query.answer(make_owm_reply(locations), cache_time=300, auto_pagination=True)
+        await update.inline_query.answer(make_owm_reply(locations), cache_time=300, auto_pagination=True)
 
       else:
-        update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
         return
 
     case 'r':
@@ -544,9 +560,9 @@ def handle_inline_respond(update: Update, context: CallbackContext):
           pxid = int(query[2:])
           results = get_related_pixiv_illust(pxid)
           if results:
-            update.inline_query.answer(results=results, cache_time=300, auto_pagination=True)
+            await update.inline_query.answer(results=results, cache_time=300, auto_pagination=True)
           else:
-            update.inline_query.answer(results=[
+            await update.inline_query.answer(results=[
               InlineQueryResultArticle(
                 id=uuid.uuid4().hex,
                 title="找不到相關色圖",
@@ -554,7 +570,7 @@ def handle_inline_respond(update: Update, context: CallbackContext):
               )], cache_time=300, auto_pagination=True)
 
         except ValueError:
-          update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+          await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
           return
 
     case 'm':
@@ -568,14 +584,14 @@ def handle_inline_respond(update: Update, context: CallbackContext):
           if matches is not None:
             twid = matches.group(2)
           else:
-            update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+            await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
             return
 
         result = make_twi_reply(twid)
         if result:
-          update.inline_query.answer(results=[result], cache_time=3600)
+          await update.inline_query.answer(results=[result], cache_time=3600)
         else:
-          update.inline_query.answer(results=[
+          await update.inline_query.answer(results=[
             InlineQueryResultArticle(
               id=uuid.uuid4().hex,
               title="找不到相關 Tweet",
@@ -583,10 +599,10 @@ def handle_inline_respond(update: Update, context: CallbackContext):
             )], cache_time=300)
 
       else:
-        update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
     case _:
-      update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+      await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
 
 # Build quote list from file `path`
@@ -640,7 +656,7 @@ def build_quote_list():
         quotes[int(param_count)].append(quote)
 
   total_quotes_count = len(quotes[0]) + len(quotes[1]) + len(quotes[2])
-  logging.info(f"Built ACG quote list with {total_quotes_count} elements")
+  log.info(f"Built ACG quote list with {total_quotes_count} elements")
 
 
 # Fetch the latest user bookmarked ids
@@ -653,7 +669,7 @@ def fetch_latest_bookmarks() -> int:
     result = api.user_bookmarks_illust(**next_qs)
     if not result.illusts:
       # Refresh token once if failed
-      logging.info(f"Pixiv token may expired, attempt to refresh...")
+      log.info("Pixiv token may expired, attempt to refresh...")
       api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
       result = api.user_bookmarks_illust(**next_qs)
 
@@ -694,8 +710,8 @@ def build_pixivid_list():
 
   n = fetch_latest_bookmarks()
 
-  logging.info(f"Added {n} new elements")
-  logging.info(f"Built pixiv list with {len(bookmark_ids)} elements")
+  log.info(f"Added {n} new elements")
+  log.info(f"Built pixiv list with {len(bookmark_ids)} elements")
 
 
 def build_admin_list():
@@ -706,41 +722,39 @@ def build_admin_list():
       admins.append(int(line.rstrip("\n")))
 
   if not admins:
-    logging.warning("No admin exist!")
+    log.warning("No admin exist!")
   else:
-    logging.info(f"Found {len(admins)} admins user_ids={admins}")
+    log.info(f"Found {len(admins)} admins user_ids={admins}")
 
 
-def main():
+def main() -> None:
   logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(filename)s:%(lineno)s]: %(funcName)s - %(message)s",
-    level=logging.INFO,
+    level=logging.WARN,
     datefmt="%Y-%m-%dT%H:%M:%S%z",
     handlers=[
       RotatingFileHandler(file_path["log-file"], mode="w+", maxBytes=5 * 1024 * 1024, backupCount=2),
       logging.StreamHandler()
     ])
-
-  logging.info(f"Bot {bot_id} is starting")
+  log.setLevel(logging.INFO)
+  log.info(f"Bot {bot_id} is starting")
   # Build lists
   build_quote_list()
   build_pixivid_list()
   build_admin_list()
-  updater = Updater(token=os.getenv("TG_BOT_API_TOKEN"))
-  dispatcher: Dispatcher = updater.dispatcher
+  
+  application = Application.builder().token(token=os.getenv("TG_BOT_API_TOKEN")).build()
   handlers = [
     CommandHandler("s2t", lambda update, context: handle_trans_cc(update, context, s2tcon)),
     CommandHandler("t2s", lambda update, context: handle_trans_cc(update, context, t2scon)),
     CommandHandler("bot_log", handle_bot_log),
     CommandHandler("update_bookmarks", handle_update_bookmarks),
     InlineQueryHandler(handle_inline_respond),
-    MessageHandler(Filters.command & ~Filters.update.edited_message, handle_cmd)
+    MessageHandler(filters.COMMAND & (~ filters.UpdateType.EDITED), handle_cmd)
   ]
 
-  for ent in handlers:
-    dispatcher.add_handler(ent)
-  updater.start_polling()
-  updater.idle()
+  application.add_handlers(handlers=handlers)
+  application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
