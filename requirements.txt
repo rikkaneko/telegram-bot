@@ -1,5 +1,4 @@
 beautifulsoup4~=4.12.2
-OpenCC~=1.1.6
 pyowm~=3.3.0
 pixivpy~=3.7.0
 python-telegram-bot~=20.4

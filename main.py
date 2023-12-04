@@ -27,10 +27,10 @@ from pathlib import Path
 from time import sleep
 from logging.handlers import RotatingFileHandler
 from typing import List
+from argparse import ArgumentParser
 
 import requests
 from bs4 import BeautifulSoup
-from opencc import OpenCC
 from pyowm import OWM
 from pyowm.utils import config as OWMConfig
 from pyowm.weatherapi25.weather import Weather
@@ -81,15 +81,11 @@ owmwmgr = owm.weather_manager()
 api = AppPixivAPI()
 api.auth(refresh_token=os.getenv("PIXIV_AUTH_TOKEN"))
 
-# OpenCC
-s2tcon = OpenCC("s2hk.json")
-t2scon = OpenCC("hk2s.json")
-
 # logger
 log = logging.getLogger(__name__)
 
 # Global shared variables
-quotes: list[list[str]] = [[], [], []]
+quotes: list[list[str]] = [[] for x in range(4)]
 total_quotes_count = 0
 bookmark_ids = []
 admins = []
@@ -109,12 +105,6 @@ help_text = f"""\
 
 *＊ 相關色圖* (2個參數)
 `@{bot_id} r `<Pixiv ID>
-
-*＊ 簡轉繁* (2個參數)
-`@{bot_id} s `<文字>
-
-*＊ 繁转简* (2個參數)
-`@{bot_id} t `<文字>
 
 *＊ 生成動漫梗* (1~3個參數)
 `@{bot_id} q `[替換OO] [替換XX]
@@ -168,35 +158,6 @@ async def handle_cmd(update: Update, context: CallbackContext):
     await handle_bot_stats(update, context)
   elif match_cmd(update.message, None, True):
     await update.message.reply_text(text="Sorry～我不懂你在說啥呢～！", quote=True)
-
-
-async def handle_trans_cc(update: Update, context: CallbackContext, cc_profile: OpenCC):
-  # Call with arguments
-  if update.message is not None:
-    text = "".join(context.args)
-    # Call with replied message as argument
-    if not text:
-      if update.message.reply_to_message is not None:
-        reply_text = cc_profile.convert(update.message.reply_to_message.text)
-        await update.message.reply_text(text=reply_text, quote=True)
-      return
-
-    message_id = update.message.message_id
-    reply_text = cc_profile.convert(text)
-    # Message id of the response message
-    replied: Message = await context.bot.send_message(chat_id=update.effective_chat.id, text=reply_text)
-    # TODO Make user_data persistence
-    context.user_data[message_id] = replied.message_id
-
-  else:
-    text = "".join(context.args)
-    if not text:
-      return
-
-    message_id = update.edited_message.message_id
-    reply_text = cc_profile.convert(text)
-    await context.bot.edit_message_text(chat_id=update.effective_chat.id, message_id=context.user_data[message_id],
-                                  text=reply_text)
 
 
 async def handle_bot_log(update: Update, context: CallbackContext):
@@ -310,7 +271,7 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
       title="來點色圖",
       description=illust.title,
       photo_url=img_url,
-      thumb_url=illust.image_urls.square_medium,
+      thumbnail_url=illust.image_urls.square_medium,
       caption=caption_text,
       parse_mode=ParseMode.MARKDOWN_V2,
       reply_markup=reply_markup
@@ -478,36 +439,6 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
       results = make_quote_reply(query[1:])
       await update.inline_query.answer(results, auto_pagination=True, cache_time=3600)
 
-    # Simplified-Traditional Chinese translate
-    case 's':
-      if len(query) > 2 and query[1] == ' ':
-        reply_text = s2tcon.convert(query[2:].strip())
-        await update.inline_query.answer(results=[
-          InlineQueryResultArticle(
-            id=uuid.uuid4().hex,
-            title="簡轉繁",
-            input_message_content=InputTextMessageContent(reply_text),
-            description=reply_text
-          )], cache_time=3600)
-
-      else:
-        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
-
-    # Traditional-Simplified Chinese translate
-    case 't':
-      if len(query) > 2 and query[1] == ' ':
-        reply_text = t2scon.convert(query[2:].strip())
-        await update.inline_query.answer(results=[
-          InlineQueryResultArticle(
-            id=uuid.uuid4().hex,
-            title="繁转简",
-            input_message_content=InputTextMessageContent(reply_text),
-            description=reply_text
-          )], cache_time=3600)
-
-      else:
-        await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
-
     # Get weather forecast
     case 'w':
       if len(query) > 2 and query[1] == ' ':
@@ -606,36 +537,34 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
 
 
 # Build quote list from file `path`
-def build_quote_list():
+def build_quote_list(*, build_only=False):
   global quotes, total_quotes_count
   path = Path(file_path["list-acg-quote"])
   # Download the file if not exist
-  if not path.exists():
-    response = requests.get(
-      "https://zh.moegirl.org.cn/index.php?title=Template:ACG%E7%BB%8F%E5%85%B8%E5%8F%B0%E8%AF%8D&action=edit")
-    # requests may not detect the correct encoding
-    response.encoding = 'UTF-8'
-    soup = BeautifulSoup(response.text, "html5lib")
-    content = soup.find("textarea", {"id": "wpTextbox1"}).text.strip()
+  if not path.exists() or build_only:
+    quote_list_sources = json.loads(os.environ.get('QUOTE_MOEGIRL_LIST'))
+    for url in quote_list_sources:
+      print(f'Processing {url}')
+      response = requests.get(url)
+      # requests may not detect the correct encoding
+      response.encoding = 'UTF-8'
+      soup = BeautifulSoup(response.text, "html5lib")
+      content = soup.find("textarea", {"id": "wpTextbox1"}).text.strip()
 
-    matches = re.findall(r"\[\[(.+?)]]", content)
-    for idx, quote in enumerate(matches[2:]):
-      qs = quote.split('|')
-      result = ""
-      for s in qs:
-        if s and not re.search(r"[/(){}]", s):
-          result = s
-          break
+      matches = re.findall(r"\[\[(.+?)]]", content)
+      for idx, quote in enumerate(matches[2:]):
+        qs = quote.split('|')
+        result = ""
+        for s in qs:
+          if s and not re.search(r"[/(){}]", s):
+            result = s
+            break
 
-      if not result:
-        continue
-
-      if re.search("o{2,}", result) and re.search("x{2,}", result):
-        quotes[2].append(s2tcon.convert(result))
-      elif re.search("o{2,}", result):
-        quotes[1].append(s2tcon.convert(result))
-      else:
-        quotes[0].append(s2tcon.convert(result))
+        if not result:
+          continue
+        
+        params = re.findall("(?<![a-zA-Z])(o|x){1,}(?![a-zA-Z])", result)
+        quotes[len(params)].append(result)
 
     # Build quote list
     fields = ["quote_text", "param_count"]
@@ -699,7 +628,7 @@ def fetch_latest_bookmarks() -> int:
 
 
 # Build Pixiv ids index from file `path`
-def build_pixivid_list():
+def build_pixivid_list(build_only=False):
   global bookmark_ids
   path = Path(file_path["list-bookmark-id"])
   path.touch(exist_ok=True)
@@ -745,8 +674,6 @@ def main() -> None:
   
   application = Application.builder().token(token=os.getenv("TG_BOT_API_TOKEN")).build()
   handlers = [
-    CommandHandler("s2t", lambda update, context: handle_trans_cc(update, context, s2tcon)),
-    CommandHandler("t2s", lambda update, context: handle_trans_cc(update, context, t2scon)),
     CommandHandler("bot_log", handle_bot_log),
     CommandHandler("update_bookmarks", handle_update_bookmarks),
     InlineQueryHandler(handle_inline_respond),
@@ -758,4 +685,14 @@ def main() -> None:
 
 
 if __name__ == '__main__':
-  main()
+  parser = ArgumentParser()
+  subparsers = parser.add_subparsers()
+  parser.set_defaults(func=lambda _: main())
+  build_quote_parser = subparsers.add_parser("build_quote")
+  build_quote_parser.set_defaults(func=lambda _: build_quote_list(build_only=True))
+  build_bookmarks_parser = subparsers.add_parser("build_bookmarks")
+  build_bookmarks_parser.set_defaults(func=lambda _: build_pixivid_list())
+  help_parser = subparsers.add_parser("help")
+  help_parser.set_defaults(func=lambda _: parser.print_usage())
+  args = parser.parse_args()
+  args.func(args)
