@@ -44,6 +44,7 @@ from telegram import (
     InlineKeyboardButton,
     InputTextMessageContent,
     Message,
+    User
   )
 from telegram.ext import (
   Application,
@@ -62,6 +63,8 @@ load_dotenv()
 
 # Bot setting
 bot_id = os.getenv("TG_BOT_ID")
+bot_pic_url = os.getenv("TG_BOT_PIC_URL")
+should_log_pixiv_query = int(os.getenv("LOG_PIXIV_QUERY") or "1")
 base_data_dir = "data"
 start_time = datetime.now()
 file_path = {
@@ -70,6 +73,7 @@ file_path = {
   "list-admin": f"{base_data_dir}/admins.txt",
   "log-file": f"{base_data_dir}/{bot_id}-{start_time.strftime('%Y%m%d%H%M%S')}.log"
 }
+
 
 # OpenWeatherMap API (via pyowm)
 owm_config = OWMConfig.get_default_config()
@@ -91,25 +95,28 @@ bookmark_ids = []
 admins = []
 
 # Counter
-query_count: dict[str, int] = {"pixiv": 0, "weather": 0}
+query_count: dict[str, int] = {"pixiv": 0, "weather": 0, "lucky": 0}
 
 help_text = f"""\
 *＊ 使用說明 ＊*
 目前支持__8__種命令：
 
-*＊ 試試手氣* (0個參數)
-`@{bot_id}`
+*＊ 試試手氣* (0~1個參數)
+`@{bot_id}` [查詢事項]
 
 *＊ 來點色圖* (0個參數)
 `@{bot_id}`
 
-*＊ 相關色圖* (2個參數)
+*＊ 看看色圖* (1個參數)
+`@{bot_id}` p <Pixiv ID>
+
+*＊ 相關色圖* (1個參數)
 `@{bot_id} r `<Pixiv ID>
 
-*＊ 生成動漫梗* (1~3個參數)
+*＊ 生成動漫梗* (0~3個參數)
 `@{bot_id} q `[替換OO] [替換XX]
 
-*＊ 天氣報告* (3~5個參數)
+*＊ 天氣報告* (1~3個參數)
 `@{bot_id} w `<City>, [Country], [State]
 ＊ 目前只支持英文
 ＊ City: 城市名
@@ -117,7 +124,7 @@ help_text = f"""\
 ＊ State: 2位字元的州份編碼
 ＊ 範例：Shanghai, CN
 
-*＊ 抓取 Twitter 原圖* (2個參數)
+*＊ 抓取 Twitter 原圖* (1個參數)
 `@{bot_id} m `<Twitter連結/ID>
 """
 
@@ -135,12 +142,10 @@ def match_cmd(message: Message, cmd: str | None, required_bot_name: bool = True)
   text = message.text
   # Command may require @[bot_id] in group
   if required_bot_name and message.chat.type in ["group", "supergroup"]:
-    if (cmd is not None and text.startswith(f"/{cmd}@{bot_id}")) or \
-        re.match(f"^/.+@{bot_id}", text):
+    if (cmd is not None and text.startswith(f"/{cmd}@{bot_id}")):
       return True
   else:
-    if cmd is not None and text.startswith(f"/{cmd}") or \
-        cmd is None and text.startswith("/"):
+    if cmd is not None and text.startswith(f"/{cmd}"):
       return True
 
   return False
@@ -149,7 +154,7 @@ def match_cmd(message: Message, cmd: str | None, required_bot_name: bool = True)
 async def handle_cmd(update: Update, context: CallbackContext):
   user = update.message.from_user
   log.info(
-    f"Received command {json.dumps({'from_user': {'id': user.id, 'username': user.name}, 'text': update.message.text}, ensure_ascii=False)}")
+    f"Received command #user_id={user.id}, #text=\"{update.message.text}\"")
   if match_cmd(update.message, "start", True):
     await update.message.reply_text(text=f"哈囉～我是 {bot_id} ～！", quote=True)
   elif match_cmd(update.message, "say", True):
@@ -176,6 +181,7 @@ async def handle_bot_stats(update: Update, context: CallbackContext):
     *＊ ACG名言數量:* {total_quotes_count}
     *＊ 色圖查詢次數:* {query_count.get("pixiv", 0)}
     *＊ 天氣查詢次數:* {query_count.get("weather", 0)}
+    *＊ 占卜查詢次數:* {query_count.get("lucky", 0)}
     ＊ 使用 /bot\\_log 下載運行日誌""")
   reply_text = re.sub(r"([.-])", r"\\\1", reply_text)
   await update.message.reply_text(reply_text, parse_mode=ParseMode.MARKDOWN_V2, quote=True)
@@ -227,7 +233,8 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
     return
 
   if pixiv_id is not None:
-    log.info(f"Querying Pixiv illustration {json.dumps({'pixiv_id': pixiv_id})}")
+    if should_log_pixiv_query == 1:
+      log.info(f"Querying Pixiv illustration #pixiv_id={pixiv_id}")
     result = api.illust_detail(pixiv_id)
     illust = result.illust
     if not illust:
@@ -239,11 +246,11 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
 
   if illust:
     if not illust.visible:
-      log.info(f"Queried ID exists but not currently accessible {json.dumps({'pixiv_id': illust.id})}")
+      log.info(f"Queried ID exists but not currently accessible #pixiv_id={illust.id}")
       return
 
-    if pixiv_id is not None:
-      log.info(f"Query sucessful {json.dumps({'pixiv_id': pixiv_id, 'title': illust.title}, ensure_ascii=False)}")
+    if pixiv_id is not None and should_log_pixiv_query == 1:
+      log.info(f"Query sucessful #pixiv_id={pixiv_id}, #title=\"{illust.title}\"")
     title = escape_markdown(illust.title, version=2)
     author = escape_markdown(illust.user.name, version=2)
     caption_text = textwrap.dedent(f"""\
@@ -277,7 +284,7 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
       reply_markup=reply_markup
     )
 
-  log.error(f"Query failed {json.dumps({'pixiv_id': pixiv_id})}")
+  log.error(f"Query failed #pixiv_id={pixiv_id}")
 
 
 # Fetch random Pixiv illustration
@@ -288,7 +295,7 @@ def get_random_pixiv_illust() -> InlineQueryResultPhoto | InlineQueryResultArtic
     reply_image = make_pixiv_illust_reply(pixiv_id=pxid)
     if reply_image:
       return reply_image
-    log.warning(f"Retrying pixiv query for the {retry_count} of 3 times {json.dumps({'pixiv_id': pxid})}")
+    log.warning(f"Retrying pixiv query for the {retry_count} of 3 times #pixiv_id={pxid}")
 
   log.warning("Retry limit reached")
   # Feedback reply
@@ -327,8 +334,7 @@ async def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
     loc_name = f'{target[1]}, {target[2]}{", " if target[3] else ""}{target[3] or ""}'
     observation = owmwmgr.weather_at_coords(target[4], target[5])
     if observation is None:
-      log.warning(f"0 result from OpenWeatherMap API received \
-        {json.dumps({'location': loc_name, 'lat': target[4], 'lon': target[5]}, ensure_ascii=False)}")
+      log.warning(f"0 result from OpenWeatherMap API received #location=\"{loc_name}\", #lat={target[4]}, #lon={target[5]}")
       return [InlineQueryResultArticle(
         id=uuid.uuid4().hex,
         title="沒有結果",
@@ -340,7 +346,7 @@ async def make_owm_reply(locations: list) -> list[InlineQueryResultArticle]:
     temp_data = weather.temperature(unit="celsius")
     wind_data = weather.wind(unit="km_hour")
     pressure = weather.barometric_pressure()
-    log.info(f"Query sucessful {json.dumps({'location': loc_name}, ensure_ascii=False)}")
+    log.info(f"Query sucessful #location=\"{loc_name}\"")
     reply_text = textwrap.dedent(f"""\
       *{loc_name} 天氣報告*
       
@@ -410,20 +416,63 @@ def make_twi_reply(twid: int) -> InlineQueryResultArticle | None:
     return None
 
 
+def make_lucky_reply(user: User, target: str | None = None):
+  today = datetime.now().strftime("%Y-%m-%d")
+  rng = random.Random(f"{today}+{user.id}+{target}")
+  possible_results = ["大凶", "凶", "小凶", "普通", "吉", "小吉", "大吉"]
+  result = possible_results[rng.randint(0,6)]
+  user_str = user.full_name
+  if user.username is not None:
+    user_str += f" (@{user.username})"
+  user_str = escape_markdown(user_str, version=2)
+  
+  message: str = ""
+  keyboard = [[
+      InlineKeyboardButton(text="我也試試", switch_inline_query_current_chat=""),
+  ]]
+  
+  if target is not None:
+    target = escape_markdown(target, version=2)
+    message = textwrap.dedent(f"""\
+      你好，{user_str}
+      所求事物：{target}
+      結果：{result}
+      """)
+    keyboard[0].append(InlineKeyboardButton(text=target, switch_inline_query_current_chat=target))
+  else:
+    message = textwrap.dedent(f"""\
+      你好，{user_str}
+      你今天的運程：{result}
+      """)
+  
+  query_count["lucky"] += 1
+  
+  return InlineQueryResultArticle(
+      id=uuid.uuid4().hex,
+      title="試試手氣",
+      description=target,
+      thumbnail_url=bot_pic_url,
+      input_message_content=InputTextMessageContent(message, parse_mode=ParseMode.MARKDOWN_V2),
+      reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
 async def handle_inline_respond(update: Update, context: CallbackContext):
   query = update.inline_query.query.strip()
   user = update.inline_query.from_user
   log.info(
-    f"Received user query {json.dumps({'from_user': {'id': user.id, 'username': user.name}, 'query_text': query}, ensure_ascii=False)}")
+    f"Received user query #user_id={user.id}, #query=\"{query}\"")
   if not query:
     reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
     reply_image = get_random_pixiv_illust()
+    reply_lucky = make_lucky_reply(user, None)
 
     await update.inline_query.answer(results=[
       reply_image,
+      reply_lucky,
       InlineQueryResultArticle(
         id=uuid.uuid4().hex,
-        title="試試手氣～",
+        title="生成動漫梗 (0~3個參數)",
         input_message_content=InputTextMessageContent(reply_quote)
       ), help_inline_reply], cache_time=0)
 
@@ -432,7 +481,7 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
   match query[0]:
     # Get help
     case 'h':
-      await update.inline_query.answer([help_inline_reply], auto_pagination=True, cache_time=3600)
+      await update.inline_query.answer([help_inline_reply], cache_time=3600)
 
     # Get quotes
     case 'q':
@@ -453,7 +502,7 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
         city_ids = owm.city_id_registry()
         locations = city_ids.ids_for(*city_loc, matching="like")
         log.info(
-          f"Found {len(locations)} locations for {json.dumps({'query_text': query[2:].strip()}, ensure_ascii=False)}")
+          f"Found {len(locations)} locations for #query=\"{query[2:].strip()}\"")
         # Only not more than 8 results
         if len(locations) == 0:
           await update.inline_query.answer(results=[
@@ -485,11 +534,11 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
         await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
         return
 
-    case 'r':
+    case 'r' | 'p':
       if len(query) > 2 and query[1] == ' ':
         try:
           pxid = int(query[2:])
-          results = get_related_pixiv_illust(pxid)
+          results = get_related_pixiv_illust(pxid) if query[0] == 'r' else [make_pixiv_illust_reply(pxid)]
           if results:
             await update.inline_query.answer(results=results, cache_time=300, auto_pagination=True)
           else:
@@ -505,7 +554,7 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
           return
 
     case 'm':
-      if len(query) > 2 and query[1] == ' ':
+      if len(query) > 3 and query[1] == ' ':
         twid: int
         try:
           twid = int(query[2:])
@@ -533,7 +582,8 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
         await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
 
     case _:
-      await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
+      reply_lucky = make_lucky_reply(user, query)
+      await update.inline_query.answer(results=[reply_lucky, help_inline_reply], cache_time=0)
 
 
 # Build quote list from file `path`
@@ -542,7 +592,7 @@ def build_quote_list(*, build_only=False):
   path = Path(file_path["list-acg-quote"])
   # Download the file if not exist
   if not path.exists() or build_only:
-    quote_list_sources = json.loads(os.environ.get('QUOTE_MOEGIRL_LIST'))
+    quote_list_sources = json.loads(os.getenv('QUOTE_MOEGIRL_LIST'))
     for url in quote_list_sources:
       print(f'Processing {url}')
       response = requests.get(url)
@@ -628,7 +678,7 @@ def fetch_latest_bookmarks() -> int:
 
 
 # Build Pixiv ids index from file `path`
-def build_pixivid_list(build_only=False):
+def build_pixivid_list():
   global bookmark_ids
   path = Path(file_path["list-bookmark-id"])
   path.touch(exist_ok=True)
