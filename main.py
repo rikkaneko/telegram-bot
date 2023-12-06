@@ -509,8 +509,10 @@ def make_gacha_reply(user: User) -> InlineQueryResultArticle:
   
   keyboard = [
     [
-      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull"})),
-      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull"})),
+      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "owner": user.id})),
+      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "owner": user.id})),
+    ], [
+      InlineKeyboardButton(text="我也試試", switch_inline_query_current_chat="")
     ]
   ]
   
@@ -595,11 +597,15 @@ async def handle_gacha_callback(update: Update, context: ContextTypes.DEFAULT_TY
   # Initate game if it is first run
   if gacha_id is None:
     gacha_id = shortuuid.uuid()
-    gacha_store[gacha_id] = gacha_init_profile
+    gacha_store[gacha_id] = dict(gacha_init_profile)
+    gacha_store[gacha_id]["owner"] = callback_data["owner"]
   
   gacha_data = gacha_store.get(gacha_id)
   if gacha_data is None:
     await query.answer("你錯過了本次躍遷活動，請開個新的吧！\n可能本BOT曾經重啟過！", show_alert=True)
+    return
+  if gacha_data["owner"] != user.id:
+    await query.answer("這不是你的按鈕！\n再亂點我要叫公司的人去你家收債了！", show_alert=True)
     return
   
   match callback_data["action"]:
@@ -675,7 +681,10 @@ async def handle_gacha_callback(update: Update, context: ContextTypes.DEFAULT_TY
       InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "id": gacha_id})),
       InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "id": gacha_id})),
     ],
-    [ InlineKeyboardButton(text="來一單648！", callback_data=json.dumps({"action": "648", "id": gacha_id})), ]
+    [ 
+      InlineKeyboardButton(text="來一單648！", callback_data=json.dumps({"action": "648", "id": gacha_id})),
+      InlineKeyboardButton(text="我也試試", switch_inline_query_current_chat=""),
+    ]
   ]
 
   await query.edit_message_text(message, ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
