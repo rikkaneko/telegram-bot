@@ -6,3 +6,4 @@ requests~=2.31.0
 python-dotenv~=1.0.0
 html5lib~=1.1
 flake8~=6.0.0
+shortuuid~=1.0.11

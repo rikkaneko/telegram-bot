@@ -14,7 +14,9 @@
 #  You should have received a copy of the GNU Lesser General Public License
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+import asyncio
 import csv
+from enum import IntEnum
 import json
 import logging
 import os
@@ -52,11 +54,14 @@ from telegram.ext import (
   CommandHandler,
   MessageHandler,
   InlineQueryHandler,
-  filters
+  filters,
+  CallbackQueryHandler,
+  ContextTypes
 )
 from telegram.constants import ParseMode
 from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
+import shortuuid
 
 # Load environment variable from .env file
 load_dotenv()
@@ -97,12 +102,44 @@ admins = []
 # Counter
 query_count: dict[str, int] = {"pixiv": 0, "weather": 0, "lucky": 0}
 
+# Gacha game
+gacha_store: dict[str, dict[str, int]] = dict()
+gacha_names = ["三星", "四星", "五星", "四星UP", "五星UP"]
+
+gacha_config: dict[str, float] = {
+  "4starup_prob": 0.5,
+  "4star_prob": 0.051,
+  "5starup_prob": 0.5,
+  "5star_prob": 0.006,
+  "5starup_prob": 0.5,
+  "4star_pity": 10,
+  "5star_pity": 90
+}
+
+gacha_init_profile: dict[str, int] = {
+  "balance": 140,
+  "total_pulls": 0,
+  "3star_count": 0,
+  "4star_count": 0,
+  "4starup_count": 0,
+  "5star_count": 0,
+  "5starup_count": 0,
+  "648_count": 0,
+  "4star_pity_remain": gacha_config["4star_pity"],
+  "5star_pity_remain": gacha_config["5star_pity"],
+  "4starup_guarantee": 0,
+  "5starup_guarantee": 0
+}
+
 help_text = f"""\
 *＊ 使用說明 ＊*
 目前支持__8__種命令：
 
 *＊ 試試手氣* (0~1個參數)
 `@{bot_id}` [查詢事項]
+
+*＊ 模擬抽卡* (1個參數)
+`@{bot_id}`
 
 *＊ 來點色圖* (0個參數)
 `@{bot_id}`
@@ -416,7 +453,7 @@ def make_twi_reply(twid: int) -> InlineQueryResultArticle | None:
     return None
 
 
-def make_lucky_reply(user: User, target: str | None = None):
+def make_lucky_reply(user: User, target: str | None = None) -> InlineQueryResultArticle:
   today = datetime.now().strftime("%Y-%m-%d")
   rng = random.Random(f"{today}+{user.id}+{target}")
   possible_results = ["大凶", "凶", "小凶", "普通", "吉", "小吉", "大吉"]
@@ -442,7 +479,7 @@ def make_lucky_reply(user: User, target: str | None = None):
   else:
     message = textwrap.dedent(f"""\
       你好，{user_str}
-      你今天的運程：{result}
+      汝今天的運程：{result}
       """)
   
   query_count["lucky"] += 1
@@ -456,6 +493,192 @@ def make_lucky_reply(user: User, target: str | None = None):
       reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+def make_gacha_reply(user: User) -> InlineQueryResultArticle:
+  user_str = user.full_name
+  if user.username is not None:
+    user_str += f" (@{user.username})"
+  user_str = escape_markdown(user_str, version=2)
+  message = textwrap.dedent(f"""\
+      你好，{user_str}
+      
+      汝辛苦刷了一整個大版本，終於存到 140 抽的石頭
+      現在是見證奇蹟的時候啦！
+      
+      點下任意躍遷按鈕開始
+      """)
+  
+  keyboard = [
+    [
+      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull"})),
+      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull"})),
+    ]
+  ]
+  
+  return InlineQueryResultArticle(
+      id=uuid.uuid4().hex,
+      title="抽卡！",
+      description="汝今天適合抽卡嗎?",
+      thumbnail_url=bot_pic_url,
+      input_message_content=InputTextMessageContent(message, parse_mode=ParseMode.MARKDOWN_V2),
+      reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+class Gacha(IntEnum):
+  NO_GACHA = 0,
+  THREE = 3,
+  FOUR = 4,
+  FIVE = 5,
+  FOUR_UP = 6,
+  FIVE_UP = 7,
+
+def do_gacha(gacha_data: dict[str, int]) -> Gacha:
+  if gacha_data["balance"] <= 0:
+    return Gacha.NO_GACHA
+  gacha_data["balance"] -= 1
+  gacha_data["total_pulls"] += 1
+  rng = random.Random(datetime.now().timestamp())
+  result = rng.random()
+  
+  # 5-star
+  if result < gacha_config["5star_prob"] or gacha_data["5star_pity_remain"] <= 1:
+    # Reset pity count
+    gacha_data["5star_pity_remain"] = gacha_config["5star_pity"]
+    result = rng.random()
+    # 5-star UP!
+    if result < gacha_config["5starup_prob"] or gacha_data["5starup_guarantee"] == 1:
+      # Reset UP guarantee
+      gacha_data["5starup_guarantee"] = 0
+      gacha_data["5starup_count"] += 1
+      return Gacha.FIVE_UP
+    else:
+      gacha_data["5star_count"] += 1
+      gacha_data["5starup_guarantee"] = 1
+      return Gacha.FIVE
+    
+  # 4-star
+  elif result < gacha_config["5star_prob"] + gacha_config["4star_prob"] or gacha_data["4star_pity_remain"] <= 1:
+    gacha_data["5star_pity_remain"] -= 1
+    # Reset pity count
+    gacha_data["4star_pity_remain"] = gacha_config["4star_pity"]
+    result = rng.random()
+    # 4-star UP!
+    if result < gacha_config["4starup_prob"] or gacha_data["4starup_guarantee"] == 1:
+      # Reset UP guarantee
+      gacha_data["4starup_guarantee"] = 0
+      gacha_data["4starup_count"] += 1
+      return Gacha.FOUR_UP
+    else:
+      gacha_data["4star_count"] += 1
+      gacha_data["4starup_guarantee"] = 1
+      return Gacha.FOUR
+    pass
+  # 3-star
+  else:
+    gacha_data["3star_count"] += 1
+    gacha_data["4star_pity_remain"] -= 1
+    gacha_data["5star_pity_remain"] -= 1
+    return Gacha.THREE
+  
+
+async def handle_gacha_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  user = update.callback_query.from_user
+  user_str = user.full_name
+  if user.username is not None:
+    user_str += f" (@{user.username})"
+  user_str = escape_markdown(user_str, version=2)
+  query = update.callback_query
+  callback_data: dict[str, int | str] = json.loads(query.data)
+  gacha_id = callback_data.get("id")
+  gacha_message: str = ""
+  has_5star = False
+  
+  # Initate game if it is first run
+  if gacha_id is None:
+    gacha_id = shortuuid.uuid()
+    gacha_store[gacha_id] = gacha_init_profile
+  
+  gacha_data = gacha_store.get(gacha_id)
+  if gacha_data is None:
+    await query.answer("你錯過了本次躍遷活動，請開個新的吧！\n可能本BOT曾經重啟過！", show_alert=True)
+    return
+  
+  match callback_data["action"]:
+    case "1pull":
+      if gacha_data["balance"] >= 1:
+        result = do_gacha(gacha_data)
+        await asyncio.sleep(0)
+        gacha_message = f"你抽到了1個{gacha_names[result-3]}"
+        if result == Gacha.FIVE or result == Gacha.FIVE_UP:
+          has_5star = True
+      else:
+        await query.answer("你沒有足夠的石頭躍遷1次¯⁠\⁠_⁠(⁠ ͡⁠°⁠ ͜⁠ʖ⁠ ͡⁠°⁠)⁠_⁠/⁠¯", show_alert=True)
+        return
+      
+    case "10pull":
+      if gacha_data["balance"] >= 10:
+        # No. of THREE, FOUR, FIVE, FOUR_UP, FIVE_UP
+        results = [0, 0, 0, 0, 0]
+        for i in range(10):
+          result = do_gacha(gacha_data)
+          results[result-3] += 1
+          if result == Gacha.FIVE or result == Gacha.FIVE_UP:
+            has_5star = True
+          await asyncio.sleep(0)
+          
+        
+        gacha_message = f"你抽到了"
+        for i in range(5):
+          if results[i] == 0:
+            continue
+          gacha_message += f"{results[i]}個{gacha_names[i]}, "
+        gacha_message = gacha_message[:-2]
+        gacha_message += "。"
+      else:
+        await query.answer("你沒有足夠的石頭躍遷10次¯⁠\⁠_⁠(⁠ ͡⁠°⁠ ͜⁠ʖ⁠ ͡⁠°⁠)⁠_⁠/⁠¯", show_alert=True)
+        return
+    
+    case "648":
+      gacha_data["balance"] += 81
+      gacha_data["648_count"] += 1
+      gacha_message = "你忍受不住課金的誘惑，下了一單648！"
+     
+  message = textwrap.dedent(f"""\
+      你好，{user_str}
+      
+      {"🎊🎊" if has_5star else ""}__{gacha_message}__{"🎊🎊" if has_5star else ""}
+      
+      *目前的成果*
+      三星: {gacha_data["3star_count"]}
+      四星: {gacha_data["4star_count"] + gacha_data["4starup_count"]}
+      五星: {gacha_data["5star_count"] + gacha_data["5starup_count"]}
+      四星UP: {gacha_data["4starup_count"]}
+      五星UP: {gacha_data["5starup_count"]}
+
+      已抽卡次數：{gacha_data["total_pulls"]}
+      剩餘的抽卡次數：{gacha_data["balance"]}
+      """)
+  
+  if gacha_data["648_count"] > 0:
+    message += f"課金次數：{gacha_data['648_count']}\n"
+  
+  if gacha_data["4star_pity_remain"] <= 0:
+    message += "_下次保證四星_\n"
+  if gacha_data["4starup_guarantee"] == 1:
+    message += "_下次抽中四星保證Up_\n"
+  if gacha_data["5star_pity_remain"] <= 0:
+    message += "_下次保證五星_\n"
+  if gacha_data["5starup_guarantee"] == 1:
+    message += "_下次抽中五星保證Up_\n"
+  
+  keyboard = [
+    [
+      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "id": gacha_id})),
+      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "id": gacha_id})),
+    ],
+    [ InlineKeyboardButton(text="來一單648！", callback_data=json.dumps({"action": "648", "id": gacha_id})), ]
+  ]
+
+  await query.edit_message_text(message, ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def handle_inline_respond(update: Update, context: CallbackContext):
   query = update.inline_query.query.strip()
@@ -466,10 +689,12 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
     reply_quote = quotes[0][random.randint(0, len(quotes[0]) - 1)]
     reply_image = get_random_pixiv_illust()
     reply_lucky = make_lucky_reply(user, None)
+    reply_gacha = make_gacha_reply(user)
 
     await update.inline_query.answer(results=[
       reply_image,
       reply_lucky,
+      reply_gacha,
       InlineQueryResultArticle(
         id=uuid.uuid4().hex,
         title="生成動漫梗 (0~3個參數)",
@@ -528,7 +753,7 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
 
           return
 
-        await update.inline_query.answer(make_owm_reply(locations), cache_time=300, auto_pagination=True)
+        await update.inline_query.answer(await make_owm_reply(locations), cache_time=300, auto_pagination=True)
 
       else:
         await update.inline_query.answer(results=[help_inline_reply], cache_time=3600)
@@ -727,7 +952,8 @@ def main() -> None:
     CommandHandler("bot_log", handle_bot_log),
     CommandHandler("update_bookmarks", handle_update_bookmarks),
     InlineQueryHandler(handle_inline_respond),
-    MessageHandler(filters.COMMAND & (~ filters.UpdateType.EDITED), handle_cmd)
+    MessageHandler(filters.COMMAND & (~ filters.UpdateType.EDITED), handle_cmd),
+    CallbackQueryHandler(handle_gacha_callback)
   ]
 
   application.add_handlers(handlers=handlers)
