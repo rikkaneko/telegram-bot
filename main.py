@@ -45,6 +45,7 @@ from telegram import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     InputTextMessageContent,
+    InputMediaPhoto,
     Message,
     User
   )
@@ -117,7 +118,7 @@ gacha_config: dict[str, float] = {
 }
 
 gacha_init_profile: dict[str, int] = {
-  "balance": 140,
+  "balance": 200,
   "total_pulls": 0,
   "3star_count": 0,
   "4star_count": 0,
@@ -264,7 +265,8 @@ def make_quote_reply(query_text: str) -> List[InlineQueryResultArticle]:
 
 # Generate Pixiv illustration reply from `pixiv_id`
 def make_pixiv_illust_reply(pixiv_id: int | None = None,
-                            illust: JsonDict | None = None) -> InlineQueryResultPhoto | None:
+                            illust: JsonDict | None = None,
+                            page: int = 0) -> InlineQueryResultPhoto | None:
   if (pixiv_id is None) == (illust is None):
     log.error("Detected incorrect usage, either pixiv_id or illust should provide value")
     return
@@ -300,15 +302,33 @@ def make_pixiv_illust_reply(pixiv_id: int | None = None,
       caption_text += f"\\#{escape_markdown(name, version=2)} "
     caption_text += f"\\#pixiv [id\\={illust.id}](https://www.pixiv.net/artworks/{illust.id})"
 
-    keyboard = [[
-      InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat=""),
-      InlineKeyboardButton(text="相關作品", switch_inline_query_current_chat=f"r {illust.id}")
-    ]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    query_count["pixiv"] += 1
-
+    keyboard = [
+      [
+        InlineKeyboardButton(text="點我再來", switch_inline_query_current_chat=""),
+        InlineKeyboardButton(text="相關作品", switch_inline_query_current_chat=f"r {illust.id}"),
+        InlineKeyboardButton(text="換一張 🔁", callback_data=json.dumps({"action": "change", "type": "pixiv"}))
+      ]
+    ]
+    
     # Get image of higher quality
     img_url = re.sub("c/600x1200_90/", "", illust.image_urls.large)
+    
+    if illust.meta_pages:
+      keyboard.insert(0, [
+        InlineKeyboardButton(
+          text="上一頁 ⬅️", callback_data=json.dumps({"id": pixiv_id, "page": page-1, "type": "pixiv"})),
+        InlineKeyboardButton(text=f"• {page} •", callback_data="{}"),
+        InlineKeyboardButton(
+          text="下一頁 ➡️", callback_data=json.dumps({"id": pixiv_id, "page": page+1, "type": "pixiv"}))
+      ])
+      
+      if page < 0 or page >= len(illust.meta_pages):
+        return
+      img_url = re.sub("c/600x1200_90/", "", illust.meta_pages[page].image_urls.large)
+        
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    query_count["pixiv"] += 1
 
     return InlineQueryResultPhoto(
       id=uuid.uuid4().hex,
@@ -362,6 +382,29 @@ def get_related_pixiv_illust(pxid: int) -> List[InlineQueryResultPhoto]:
       replies.append(i)
 
   return replies
+
+async def handle_pixiv_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  query = update.callback_query
+  callback_data: dict[str, int | str] = json.loads(query.data)
+  
+  if callback_data.get("action") == "change":
+    update_result = get_random_pixiv_illust()
+    
+  elif "id" in callback_data and "page" in callback_data:
+    update_result = make_pixiv_illust_reply(pixiv_id=callback_data["id"], page=callback_data["page"])
+    if not update_result:
+      await query.answer("已經到底啦！", show_alert=True)
+      return
+  
+  # Update existing message
+  await query.edit_message_media(
+    media=InputMediaPhoto(
+      media=update_result.photo_url, 
+      caption=update_result.caption, 
+      parse_mode=update_result.parse_mode
+    ),
+    reply_markup=update_result.reply_markup
+  )
 
 
 # Generate weather reply based on given `locations`
@@ -501,7 +544,7 @@ def make_gacha_reply(user: User) -> InlineQueryResultArticle:
   message = textwrap.dedent(f"""\
       你好，{user_str}
       
-      汝辛苦刷了一整個大版本，終於存到 140 抽的石頭
+      汝辛苦刷了一整個大版本，終於存到 200 抽的石頭
       現在是見證奇蹟的時候啦！
       
       點下任意躍遷按鈕開始
@@ -509,8 +552,8 @@ def make_gacha_reply(user: User) -> InlineQueryResultArticle:
   
   keyboard = [
     [
-      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "owner": user.id})),
-      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "owner": user.id})),
+      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "owner": user.id, "type": "gacha"})),
+      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "owner": user.id, "type": "gacha"})),
     ], [
       InlineKeyboardButton(text="我也試試", switch_inline_query_current_chat="")
     ]
@@ -596,7 +639,7 @@ async def handle_gacha_callback(update: Update, context: ContextTypes.DEFAULT_TY
   
   # Initate game if it is first run
   if gacha_id is None:
-    gacha_id = shortuuid.uuid()
+    gacha_id = shortuuid.uuid()[:8]
     gacha_store[gacha_id] = dict(gacha_init_profile)
     gacha_store[gacha_id]["owner"] = callback_data["owner"]
   
@@ -674,15 +717,15 @@ async def handle_gacha_callback(update: Update, context: ContextTypes.DEFAULT_TY
   if gacha_data["5star_pity_remain"] <= 0:
     message += "_下次保證五星_\n"
   if gacha_data["5starup_guarantee"] == 1:
-    message += "_下次抽中五星保證Up_\n"
+    message += "_下次抽中五星保證Up（你歪了）_\n"
   
   keyboard = [
     [
-      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "id": gacha_id})),
-      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "id": gacha_id})),
+      InlineKeyboardButton(text="躍遷1次", callback_data=json.dumps({"action": "1pull", "id": gacha_id, "type": "gacha"})),
+      InlineKeyboardButton(text="躍遷10次", callback_data=json.dumps({"action": "10pull", "id": gacha_id, "type": "gacha"})),
     ],
     [ 
-      InlineKeyboardButton(text="來一單648！", callback_data=json.dumps({"action": "648", "id": gacha_id})),
+      InlineKeyboardButton(text="來一單648！", callback_data=json.dumps({"action": "648", "id": gacha_id, "type": "gacha"})),
       InlineKeyboardButton(text="我也試試", switch_inline_query_current_chat=""),
     ]
   ]
@@ -819,6 +862,21 @@ async def handle_inline_respond(update: Update, context: CallbackContext):
       reply_lucky = make_lucky_reply(user, query)
       await update.inline_query.answer(results=[reply_lucky, help_inline_reply], cache_time=0)
 
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  query = update.callback_query
+  callback_data: dict[str, int | str] = json.loads(query.data)
+  
+  if not "type" in callback_data:
+    return
+
+  match callback_data["type"]:
+    case "pixiv":
+      await handle_pixiv_callback(update, context)
+    
+    case "gacha":
+      await handle_gacha_callback(update, context)
+  
 
 # Build quote list from file `path`
 def build_quote_list(*, build_only=False):
@@ -962,7 +1020,7 @@ def main() -> None:
     CommandHandler("update_bookmarks", handle_update_bookmarks),
     InlineQueryHandler(handle_inline_respond),
     MessageHandler(filters.COMMAND & (~ filters.UpdateType.EDITED), handle_cmd),
-    CallbackQueryHandler(handle_gacha_callback)
+    CallbackQueryHandler(handle_callback_query)
   ]
 
   application.add_handlers(handlers=handlers)
